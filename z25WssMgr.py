@@ -34,8 +34,10 @@ class Z25WSSMgr:
 					log(msg['type'])
 					self.ctx.z25.restartCBX()
 			except:
-				log(sys.exc_info())
-				log(f"Connection closed.")
+				#log(sys.exc_info())
+				self.connections={}
+				self.queues={}
+				log(f"Connection closed. {len(self.connections.keys())}")
 				break
 
 	async def sender(self,websocket):
@@ -56,34 +58,21 @@ class Z25WSSMgr:
 					await asyncio.sleep(1)
 
 			except Exception as e:
-				log(sys.exc_info())
 				if type(e)==type(asyncio.CancelledError()):
 					e.stopPropagation()
 					log('No Biggie')
 				else:
-					log('sender exception')
-					log(sys.exc_info())
-					"""
-					try:
-						log("deleting connections")
-						del self.queues[websocket]
-						del self.connections[websocket]
-					except:log(sys.exc_info())
 					return
-					"""
 				log('sender: continuing after exception')
 
 	async def handler(self,websocket):
 		#log('handler')
 		if not websocket in list(self.queues):
 			self.queues[websocket]=[]
-			try:
-				#log('attempting to create M22 for client @websocket ... ')
-				self.connections[websocket]=self.THE_M22
-			except:
-				log(sys.exc_info())
-			#self.sendZ23D()
-			#self.sendBlockUpdateNow()
+			self.connections[websocket]={}
+		
+		self.ctx.z25.sendZ25D()
+		self.ctx.z25.sendBlockUpdateNow()
 
 		#log('handler for websocket');
 

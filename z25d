@@ -110,6 +110,25 @@ class Candlestick:
 			log(f"CSTK update: {sys.exc_info()}")
 		return lookAtMe
 
+def _fetch_open24h_legacy(product_id: str):
+	"""Fetch open price for last 24h from legacy Exchange REST stats endpoint.
+	Returns float or None on failure. This is a minimal addition and unauthenticated."""
+	try:
+		url = f"https://api.exchange.coinbase.com/products/{product_id}/stats"
+		r = requests.get(url, timeout=5)
+		if r.status_code != 200:
+			return None
+		j = r.json()
+		v = j.get('open')
+		if v is None:
+			return None
+		try:
+			return float(v)
+		except Exception:
+			return None
+	except Exception:
+		return None
+
 class Channel:
 	def __init__(self, msg):
 		self.first_msg = msg
@@ -132,7 +151,13 @@ class Channel:
 		self.price = float(msg['price'])
 		self.high_24h = float(msg['high_24h'])
 		self.low_24h = float(msg['low_24h'])
-		self.open_24h = float(msg['open_24h'])
+		#self.open_24h = float(msg['open_24h'])
+		# seed open_24h once from legacy REST
+		_pid = getattr(self, 'pid', None) or getattr(self, 'product_id', None)
+		if _pid and getattr(self, 'open_24h', None) in (None, 0, 0.0):
+			_o = _fetch_open24h_legacy(_pid)
+			if _o is not None:
+				self.open_24h = _o
 		self.volume_1m = float(msg['volume_24h'])/(24.*60.)
 		#
 		self.nbin=DEFAULT_NBIN#1 min blocks, so minimal data
@@ -194,7 +219,7 @@ class Channel:
 			#self.price = float(msg['price'])
 			self.high_24h = float(msg['high_24h'])
 			self.low_24h = float(msg['low_24h'])
-			self.open_24h = float(msg['open_24h'])
+			self.open_24h = self.open_24h
 			self.volume_1m = float(msg['volume_24h'])/(24.*60.)
 			if not len(self.data):
 				cstk = Candlestick(self.price, msg)
@@ -256,11 +281,9 @@ class Channel:
 			'price': self.price,
 			'high_24h': self.high_24h,
 			'low_24h': self.low_24h,
-			'volume_1m': self.volume_1m
+			'volume_1m': self.volume_1m,
+			'open_24h':self.open_24h
 		}
-
-		if WS_CBX_FEED==OLD_WS_FEED:
-			rval['open_24h']=self.open_24h
 
 		for cidx in range(len(self.data)):
 			#2023-03-18T20:36:07.774Z -- format @js-side
@@ -299,15 +322,16 @@ class Z25d:
 		self.ctx.z25=self
 		self.ctx.wss.takeCtx(self.ctx)
 		self.ctx.acct.takeCtx(self.ctx)
+		self.ctx.acct.refresh_accounts()
 
 		self.CBX_FEED=None
 		self.cbx_thread = None
 		self.subscribed_products_list=['BTC-USD']
 		self.subscribed_products_string=""
 		#
-		self.subscribeVol = False
-		self.subscribePct = False
-		self.subscribeBal = False
+		self.subscribeVol = True
+		self.subscribePct = True
+		self.subscribeBal = True
 		self.subscribeBTC = True
 		self.subscribeETH = True
 		#
@@ -321,33 +345,31 @@ class Z25d:
 		secs=now.second
 		until_top_of_minute=60-secs
 		self.tnext=time.time()+until_top_of_minute
+		#
+		self.pctThresh = GLOBAL_PCT_THRESH
+		self.volThresh = GLOBAL_VOL_THRESH
 
 	def start(self):
-		#frontend_thread = threading.Thread(target=self.wss.listen)
-		#frontend_thread.start()
 		asyncio.run(self.ctx.wss.xmain())
-		#while True:
-		#	print(f"{datetime.datetime.now()}")
-		#	time.sleep(15)
 
 	def update_channel(self, msg):
-		log(f"update_channel {msg['product_id']}")
+		#log(f"update_channel {msg['product_id']}")
 		if msg['product_id'] in list(self.channels):
 			#log(f"updating channel {msg['product_id']}")
 			rval = self.channels[msg['product_id']].update(msg)#rval=isNewForWatch (either Vol or Pct or Both)
-			sendFlag=False
+			sendFlag=True
 			if self.subscribePct == True and (rval == 2 or rval == 3):sendFlag=True
 			elif self.subscribeVol == True and (rval == 1 or rval == 3):sendFlag=True
-			#log(f"sendFlag = {sendFlag}")
+			log(f"sendFlag = {sendFlag}")
 			if sendFlag == True:#0,1,2,3 no,newvol,newpct,newboth then we bring client up-to-date with this channel immedieately (vs top of minute) 1x
 				#good place to add b/c only called 1x on first NewForWatch
 				if not msg['product_id'] in self.sendlist:
 					log('CULPRIT rval = {} {} {} {}'.format(rval,msg['product_id'],self.subscribePct,self.subscribeVol))
 					self.sendlist.append(msg['product_id'])
 					#self.sendBlockUpdateNow()#  either way its sending block update below, so this appears 2B redundant
-				for wskey in list(self.connections):
+				for wskey in list(self.ctx.wss.connections):
 					#log(f"sending for {msg['product_id']}")
-					self.queues[wskey].append(json.dumps(self.channels[msg['product_id']].block_update()))
+					self.ctx.wss.queues[wskey].append(json.dumps(self.channels[msg['product_id']].block_update()))
 		else:
 			log(f"CREATE {msg['product_id'] in self.channels}\t{msg['product_id']}")
 			c = Channel(msg)
@@ -375,7 +397,7 @@ class Z25d:
 			'timestamp': timestamp,
 			'signature': self.sign_message(timestamp + channel + self.subscribed_products_string)
 		}
-		plog(subscribe_msg)
+		#plog(subscribe_msg)
 		subscribe_msg = json.dumps(subscribe_msg)
 
 		def on_open(ws):
@@ -429,14 +451,14 @@ class Z25d:
 			#plog(msg)
 			#print(f"{self.ctx.wss.connections}")
 			if msg['product_id'] == 'BTC-USD' and self.subscribeBTC:
-				for wskey in list(self.ctx.wss.connections):
+				for wskey in self.ctx.wss.connections:
 					self.ctx.wss.queues[wskey].append(json.dumps(msg))
-					log(f"self.queues = {self.queues}")
+					#log(f"self.ctx.wss.queues = {self.ctx.wss.queues}")
 			elif msg['product_id'] == 'ETH-USD' and self.subscribeETH:
-				for wskey in list(self.ctx.wss.connections):
+				for wskey in self.ctx.wss.connections:
 					self.ctx.wss.queues[wskey].append(json.dumps(msg))
 			elif msg['product_id'] in self.sendlist:#msg['product_id'] in self.channels and (self.channels[msg['product_id']].lookAtMePCT == True or self.channels[msg['product_id']].lookAtMeVOL == True):
-				for wskey in list(self.ctx.wss.connections):#NEED:sendlist is currently default GRT only
+				for wskey in self.ctx.wss.connections:#NEED:sendlist is currently default GRT only
 					self.ctx.wss.queues[wskey].append(json.dumps(msg))
 			
 			#print(f"{len(self.ctx.wss.queues[wskey])}")
@@ -470,6 +492,69 @@ class Z25d:
 		message = hmac.new(API_SECRET.encode('utf-8'), message.encode('utf-8'), digestmod=hashlib.sha256).hexdigest()
 		return message
 
+	def sendZ25D(self):
+		log('sendZ25D')
+		z25state = {#these are client subscriptions (sets of pids of which to send), not cbx
+			'type':'z25d',
+			'subscribeVol':self.subscribeVol,
+			'subscribePct':self.subscribePct,
+			'subscribeBal':self.subscribeBal,
+			'subscribeBTC':self.subscribeBTC,
+			'subscribeETH':self.subscribeETH,
+			'pctThresh':self.pctThresh,
+			'volThresh':self.volThresh,
+			'nbin':DEFAULT_NBIN,
+			'dt':DEFAULT_DT,
+			'numChannels':len(list(self.channels.keys())),
+			'cbxMsgsReceived':0,
+			'cbxMsgsSent':0,
+			'clientMsgsReceived':0,
+			'clientMsgsSent':0,
+			'sendlist':self.sendlist,
+		}
+		json_state = json.dumps(z25state)
+		log(json_state)
+		for wskey in list(self.ctx.wss.connections):
+			log('sending json_state to {}'.format(wskey))
+			self.ctx.wss.queues[wskey].append(json_state)
+
+	def sendBlockUpdateNow(self):
+		collective_block_update = {'type':'collective_block_update',}
+		lookAtMeCountVOL=0
+		lookAtMeCountPCT=0
+		for c in self.channels.values():
+			#log('{} {} {:.3f}'.format(c.pid, c.count, float(c.price)))
+			retain = False
+
+			if c.pid == 'BTC-USD' and self.subscribeBTC:
+				retain = True
+			
+			if c.pid == 'ETH-USD' and self.subscribeETH:
+				retain = True
+			
+			if c.lookAtMeVOL:
+				lookAtMeCountVOL += 1
+				if self.subscribeVol:
+					retain = True
+			
+			if c.lookAtMePCT:
+				lookAtMeCountPCT += 1
+				if self.subscribePct:
+					retain = True
+
+			if c.balance and self.subscribeBal:
+				retain = True
+			
+			if c.subscribed:#ie manually subscribed, and persistent
+				retain = True	
+
+			if retain == True:
+				collective_block_update[c.pid] = c.block_update()
+
+		#log('lookAtMeCountVOL: {} lookAtMeCountPCT: {}'.format(lookAtMeCountVOL,lookAtMeCountPCT))
+		for wskey in list(self.ctx.wss.connections):
+			self.ctx.wss.queues[wskey].append(json.dumps(collective_block_update))
+
 if __name__=="__main__":
 	z25d=Z25d()
 	z25d.start()
@@ -477,22 +562,22 @@ if __name__=="__main__":
 
 """
 {
-    "best_ask": "111670.07",
-    "best_ask_size": "0.10681918",
-    "best_bid": "111670.06",
-    "best_bid_size": "0.01732166",
-    "high_24h": "111968.52",
-    "last_size": "0.00118205",
-    "low_24h": "110693.01",
-    "open_24h": "111042.13",
-    "price": "111670.06",
-    "product_id": "BTC-USD",
-    "sequence": 114244292687,
-    "side": "sell",
-    "time": "2025-10-25T23:17:05.912923Z",
-    "trade_id": 891776535,
-    "type": "ticker",
-    "volume_24h": "1423.09388994",
-    "volume_30d": "241615.25295228"
+	"best_ask": "111670.07",
+	"best_ask_size": "0.10681918",
+	"best_bid": "111670.06",
+	"best_bid_size": "0.01732166",
+	"high_24h": "111968.52",
+	"last_size": "0.00118205",
+	"low_24h": "110693.01",
+	"open_24h": "111042.13",
+	"price": "111670.06",
+	"product_id": "BTC-USD",
+	"sequence": 114244292687,
+	"side": "sell",
+	"time": "2025-10-25T23:17:05.912923Z",
+	"trade_id": 891776535,
+	"type": "ticker",
+	"volume_24h": "1423.09388994",
+	"volume_30d": "241615.25295228"
 }
 """
