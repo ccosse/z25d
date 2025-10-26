@@ -1,0 +1,498 @@
+#!/usr/bin/env python3
+def log(msg):
+	print(f"{msg}")
+
+def plog(_x):#pretty log
+	print(json.dumps(_x, indent=4, sort_keys=True))
+
+if True:
+	import AppContext as appContext
+	import os,sys,time,threading,websocket,hashlib,io,csv,math
+	import json, hmac, hashlib, time, base64
+	import requests,datetime
+	import locale,pytz
+	from pytz import timezone
+	import websockets
+	import asyncio
+	import random,copy
+	import json, hmac, hashlib, time, requests
+	from requests.auth import AuthBase
+	import z25WssMgr as wssMgr
+	import z25TxAcctMgr as acctMgr
+
+	CURRENCIES_URL = 'https://api.exchange.coinbase.com/currencies'
+	WS_CBX_FEED="wss://ws-feed.exchange.coinbase.com"
+
+	inf = open('/home/charlie/z23/cbx_credentials.dat','r')
+	contents = inf.read()
+	inf.close()
+	cbx = eval(contents)
+	key_public = cbx['api-key']
+	key_secret = cbx['api-secret']
+
+	API_KEY = key_public#PUBLIC
+	API_SECRET = key_secret#SIGNING
+
+	GLOBAL_VOL_THRESH = 20
+	GLOBAL_PCT_THRESH = 0.85
+	DEFAULT_NBIN = 100
+	DEFAULT_DT = 60
+
+class Candlestick:
+	def __init__(self, P0, MSG):
+		self.count = 1
+		self.PID = MSG['product_id']
+		self.Open = P0#c['price_history'][0][0],
+		self.Close = P0#c['price_history'][0][1],
+		self.Low = P0#c['price_history'][0][2],
+		self.High = P0#c['price_history'][0][3],
+		self.Mid = P0#c['price_history'][0][4],
+		self.BuyVOL = 0#c['buy_volume_histo'][0]+c['sell_volume_histo'][0],
+		self.SellVOL = 0#c['buy_volume_histo'][0]+c['sell_volume_histo'][0],
+		self.BuyUSD	= 0#c['buy_usd_histo'][0],
+		self.SellUSD = 0#c['sell_usd_histo'][0]
+		self.PricePctChange = 0
+		
+		try:self.pctThresh = MSG['pctThresh']#!!!new cstcks aren't getting curent pctThresh!
+		except:self.pctThresh=GLOBAL_PCT_THRESH
+
+		self.t0 = str(datetime.datetime.now().astimezone(timezone('UTC'))).replace(' ','T')
+		self.tlast = str(datetime.datetime.now().astimezone(timezone('UTC'))).replace(' ','T')#THIS IS WHAT WE PLOT (slides)
+		self.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) + datetime.timedelta(minutes=1)).replace(' ','T')
+
+	def get(self):
+		return self.__dict__
+		"""
+		{ 
+			'price': self.Close, 
+			'Date': self.t0, 
+			'SellVOL': self.SellVOL, 
+			'BuyVOL': self.BuyVOL, 
+			'High': self.High, 
+			'Low': self.Low, 
+			'Open': self.Open, 
+			'BuyUSD': self.BuyUSD, 
+			'SellUSD': self.SellUSD,
+			'PricePctChange':self.PricePctChange,
+			'pctThresh':self.pctThresh,
+			'dict':self.__dict__,
+		}	
+		"""
+
+	def setThresh(self, pctThresh):
+		self.pctThresh = pctThresh
+
+	def update(self, MSG):
+		lookAtMe = False
+		try:
+			self.count += 1
+			p = float(MSG['price'])
+			self.Close = p#just use this for latest price
+			if p > self.High:self.High = p
+			elif p < self.Low:self.Low = p
+			self.Mid = (self.High + self.Low)/2.
+			#
+			self.PricePctChange = (p - self.Open)/self.Open * 100.
+			#log('{} PCT {}'.format(self.PID, math.fabs(self.PricePctChange)))
+			if math.fabs(self.PricePctChange) > self.pctThresh:
+				lookAtMe = True
+				#log('{} {} {} {}'.format(self.PID,self.PricePctChange,self.pctThresh,math.fabs(self.PricePctChange) > self.pctThresh))
+			#
+			if True:#WS_CBX_FEED==OLD_WS_FEED:
+				if MSG['side'] == 'sell':
+					self.SellUSD += float(MSG['last_size'])*float(MSG['price'])
+					self.SellVOL += float(MSG['last_size'])
+				elif MSG['side'] == 'buy':
+					self.BuyUSD += float(MSG['last_size'])*float(MSG['price'])
+					self.BuyVOL += float(MSG['last_size'])
+
+		except:
+			log(f"CSTK update: {sys.exc_info()}")
+		return lookAtMe
+
+class Channel:
+	def __init__(self, msg):
+		self.first_msg = msg
+		self.count = 0
+		self.pid = msg['product_id']
+		self.currency = msg['product_id'].split('-')[0]
+		self.lookAtMePCT = False
+		self.lookAtMeVOL = False
+		self.pctThresh = GLOBAL_PCT_THRESH#these need to be set for each new channel
+		self.volThresh = GLOBAL_VOL_THRESH
+		
+		#log(f"Channel {self.pid}")
+		#
+		self.balance = None
+		#
+		self.subscribed = False
+		self.hidden = False
+		
+		self.price=self.high_24h=self.low_24h=self.open_24h=self.volume_1m=0
+		self.price = float(msg['price'])
+		self.high_24h = float(msg['high_24h'])
+		self.low_24h = float(msg['low_24h'])
+		self.open_24h = float(msg['open_24h'])
+		self.volume_1m = float(msg['volume_24h'])/(24.*60.)
+		#
+		self.nbin=DEFAULT_NBIN#1 min blocks, so minimal data
+		self.dt=DEFAULT_DT
+		account_sid = None
+		auth_token = None
+		#self.twilio_client = Client(account_sid, auth_token)
+		#
+		self.data = []
+		msg['pctThresh'] = self.pctThresh
+		#log(f"calling cstk {self.price} {msg}")
+		cstk = Candlestick(self.price, msg)
+		#log(f"cstk = {cstk}")
+
+		self.tz_offset = datetime.timedelta(hours=7)
+		cstk.t0 = str(datetime.datetime.now().astimezone(timezone('UTC'))).replace(' ','T')
+		cstk.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=1)).replace(' ','T')
+		
+		self.data.append(cstk)
+		for cidx in range(1,self.nbin+1):
+			cstk = Candlestick(self.price, msg)
+			cstk.t0 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=cidx)).replace(' ','T')
+			cstk.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=(cidx+1))).replace(' ','T')
+			self.data.append(cstk)
+		self.report()
+	
+	def get_data_for_export(self):
+		#self.data=[]
+		cstk_data=[]
+		export_dict=copy.copy(self.__dict__)
+		for didx in range(len(self.data)):
+			cstk_data.append(copy.copy(self.data[didx].__dict__))
+		export_dict['tz_offset']=str(self.tz_offset)
+		export_dict['data']=cstk_data
+		return export_dict
+	
+	def take_data_for_import(self,import_dict):
+		try:
+			for didx in range(len(import_dict['data'])):#ea cstk data
+				cstk=Candlestick(import_dict['price'],{'product_id':import_dict['pid']})#cstk obj
+				cstk.__dict__=import_dict['data'][didx]#assign data to obj
+				import_dict['data'][didx]=cstk#replace
+			self.__dict__=import_dict#replace
+		except:print(f"take_data_for_import:\n{import_dict}\n{sys.exc_info()}")
+
+	def setThresh(self, pctThresh, volThresh):
+		self.volThresh = volThresh
+		self.pctThresh = pctThresh#this is really cstkc prprty, but here for cstk init at cycle
+		for cstk in self.data:
+			cstk.setThresh(pctThresh)
+
+	def update(self, msg):
+		try:
+			#log('update {}\t{}'.format(self.pid, msg['price']))
+			if msg.get("type") != "ticker": 
+				return
+			self.count += 1
+			self.price = float(msg.get("price", 0.0) or 0.0)
+			#self.price = float(msg['price'])
+			self.high_24h = float(msg['high_24h'])
+			self.low_24h = float(msg['low_24h'])
+			self.open_24h = float(msg['open_24h'])
+			self.volume_1m = float(msg['volume_24h'])/(24.*60.)
+			if not len(self.data):
+				cstk = Candlestick(self.price, msg)
+				#log(f"cstk = {cstk}")
+
+				self.tz_offset = datetime.timedelta(hours=7)
+				cstk.t0 = str(datetime.datetime.now().astimezone(timezone('UTC'))).replace(' ','T')
+				cstk.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=1)).replace(' ','T')
+
+				self.data.append(cstk)
+				for cidx in range(1,self.nbin+1):
+					cstk = Candlestick(self.price, msg)
+					cstk.t0 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=cidx)).replace(' ','T')
+					cstk.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=(cidx+1))).replace(' ','T')
+					self.data.append(cstk)
+				return
+
+			rval = self.data[0].update(msg)#update the leading candlestick; returns lookAtMe
+			#log('rval {}'.format(rval))
+			isNewForWatch = 0
+			if rval == True:
+				if not self.lookAtMePCT:
+					#log('PCT lookAtMe {}'.format(self.pid))
+					self.lookAtMePCT = True
+					isNewForWatch = 2
+				else:
+					pass
+					#log('ALREADY watching PCT {} {}'.format(self.pid, self.lookAtMePCT))
+
+			#log('{} VOL {} {}'.format(self.pid, (self.data[0].BuyVOL + self.data[0].SellVOL), self.volume_1m))
+			if (self.data[0].BuyVOL + self.data[0].SellVOL) > (self.volThresh * self.volume_1m):
+				if not self.lookAtMeVOL:
+					#log('VOL lookAtMe {}'.format(self.pid))
+					self.lookAtMeVOL = True
+					isNewForWatch = 1
+					if self.lookAtMePCT:isNewForWatch=3
+				else:
+					pass
+					#log('ALREADY watching VOL {} {}'.format(self.pid, self.lookAtMeVOL))
+
+			return isNewForWatch
+		except:
+			log(f"Channel.update: {sys.exc_info()}")
+			dummy=input('Enter to continue')
+		return False
+	
+	def block_update(self):
+		# A lightweight snapshot overlay at top-of-minute; past histo data is just candlesticks; 
+		rval = {
+			'type': 'block_update',
+			'product_id': self.pid,
+			'nbin': self.nbin,
+			'price_data': [],
+			'balance': self.balance,
+			'subscribed': self.subscribed,
+			'hidden': self.hidden,
+			'lookAtMePCT': self.lookAtMePCT,
+			'lookAtMeVOL': self.lookAtMeVOL,
+			'price': self.price,
+			'high_24h': self.high_24h,
+			'low_24h': self.low_24h,
+			'volume_1m': self.volume_1m
+		}
+
+		if WS_CBX_FEED==OLD_WS_FEED:
+			rval['open_24h']=self.open_24h
+
+		for cidx in range(len(self.data)):
+			#2023-03-18T20:36:07.774Z -- format @js-side
+			#tdata = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=cidx)).replace(' ','T')
+			rval['price_data'].append(self.data[cidx].get())
+		return rval
+
+	def cycle(self):
+		self.data.insert(0,Candlestick(self.price, {'product_id':self.pid, 'pctThresh': self.pctThresh}))
+		self.data.pop()
+		#self.report()
+		return self.block_update()
+
+	def report(self):
+		#log('report {} len(data): {}'.format(self.pid,len(self.data)))
+		oufline = '{}\t{:7d}'.format(self.pid, self.count)
+		#for cidx in range(len(self.data)):
+		#	#log('cidx {}'.format(cidx))
+		#	oufline += '\t{:10.4f}'.format(self.data[cidx].Open)
+		#	#log(oufline)
+		#log(oufline)
+
+class Z25d:
+	def __init__(self):
+		print(f"Z25d.__init__")
+		#
+		self.channels={}
+		self.sendlist = []
+		self.currencies=[]
+		#
+		wss = wssMgr.Z25WSSMgr()
+		acct = acctMgr.Z25TxAcctMgr()
+		self.ctx = appContext.AppContext()
+		self.ctx.wss=wss
+		self.ctx.acct=acct
+		self.ctx.z25=self
+		self.ctx.wss.takeCtx(self.ctx)
+		self.ctx.acct.takeCtx(self.ctx)
+
+		self.CBX_FEED=None
+		self.cbx_thread = None
+		self.subscribed_products_list=['BTC-USD']
+		self.subscribed_products_string=""
+		#
+		self.subscribeVol = False
+		self.subscribePct = False
+		self.subscribeBal = False
+		self.subscribeBTC = True
+		self.subscribeETH = True
+		#
+
+		self.CBX_FEED=None
+		self.cbx_thread = None
+		self.close_cycler_thread = False
+		self.close_cbx_thread = False
+		#
+		now=datetime.datetime.now()
+		secs=now.second
+		until_top_of_minute=60-secs
+		self.tnext=time.time()+until_top_of_minute
+
+	def start(self):
+		#frontend_thread = threading.Thread(target=self.wss.listen)
+		#frontend_thread.start()
+		asyncio.run(self.ctx.wss.xmain())
+		#while True:
+		#	print(f"{datetime.datetime.now()}")
+		#	time.sleep(15)
+
+	def update_channel(self, msg):
+		log(f"update_channel {msg['product_id']}")
+		if msg['product_id'] in list(self.channels):
+			#log(f"updating channel {msg['product_id']}")
+			rval = self.channels[msg['product_id']].update(msg)#rval=isNewForWatch (either Vol or Pct or Both)
+			sendFlag=False
+			if self.subscribePct == True and (rval == 2 or rval == 3):sendFlag=True
+			elif self.subscribeVol == True and (rval == 1 or rval == 3):sendFlag=True
+			#log(f"sendFlag = {sendFlag}")
+			if sendFlag == True:#0,1,2,3 no,newvol,newpct,newboth then we bring client up-to-date with this channel immedieately (vs top of minute) 1x
+				#good place to add b/c only called 1x on first NewForWatch
+				if not msg['product_id'] in self.sendlist:
+					log('CULPRIT rval = {} {} {} {}'.format(rval,msg['product_id'],self.subscribePct,self.subscribeVol))
+					self.sendlist.append(msg['product_id'])
+					#self.sendBlockUpdateNow()#  either way its sending block update below, so this appears 2B redundant
+				for wskey in list(self.connections):
+					#log(f"sending for {msg['product_id']}")
+					self.queues[wskey].append(json.dumps(self.channels[msg['product_id']].block_update()))
+		else:
+			log(f"CREATE {msg['product_id'] in self.channels}\t{msg['product_id']}")
+			c = Channel(msg)
+			#log(c)
+			try:
+				c.balance = 0#float(self.THE_M22.accounts[c.currency]['balance'])
+			except:
+				log(sys.exc_info())
+				c.balance = 0
+				#log(self.THE_M22.accounts)
+			#log(f"{self.channels}")
+			#log(f"Channel = {c.pid} Balance = {c.balance}")
+			self.channels[c.pid] = c#Channel(msg)#does update
+			#log(self.channels[c.pid])
+
+	def subscribe_new(self):
+		channel = 'ticker'
+		timestamp = str(int(time.time()))
+		subscribe_msg = {
+			'type': 'subscribe',
+			"channels": [
+   			 { "name": "ticker", "product_ids": self.subscribed_products_list }
+  			],
+			'api_key': API_KEY,
+			'timestamp': timestamp,
+			'signature': self.sign_message(timestamp + channel + self.subscribed_products_string)
+		}
+		plog(subscribe_msg)
+		subscribe_msg = json.dumps(subscribe_msg)
+
+		def on_open(ws):
+			self.CBX_FEED.send(subscribe_msg)
+		
+		def mkOldFmt(msg):
+			#log(f"mkOldFmt")
+			try:
+				rval ={
+					"best_ask": "0",
+					"best_ask_size": "0",
+					"best_bid": "0",
+					"best_bid_size": "0",
+					"high_24h": msg["high_24h"],
+					"last_size": msg["last_size"],
+					"low_24h": msg["low_24h"],
+					"open_24h": str(self.channels[msg["product_id"]].open_24h) if msg.get("product_id") in self.channels else "0",
+					"price": msg["price"],
+					"product_id": msg["product_id"],
+					"sequence": msg["sequence"],
+					"side": "sell",
+					"time": msg["time"],
+					"trade_id": 0,
+					"type": "ticker",
+					"volume_24h": msg["volume_24h"],
+					"volume_30d": msg["volume_30d"]
+				}
+				return rval
+			except:
+				log(f"{sys.exc_info()}")
+			return None
+
+		def on_message(ws, raw_msg):
+			msg=json.loads(raw_msg)#ticker update from coinbase
+			#plog(msg)
+			if msg['type']=="error":
+				#log(f"{raw_msg}")
+				product_id=msg['reason'].split(" ")[0]
+				self.subscribed_products_list.remove(product_id)
+				return
+			
+			elif msg['type']=='subscriptions':
+				self.subscribed_products_list=msg['channels']['product_ids']
+				return
+
+			elif msg['type']!='ticker':
+				log(f'not a ticker message {raw_msg}')
+				return
+			
+			msg=mkOldFmt(msg)
+			#plog(msg)
+			#print(f"{self.ctx.wss.connections}")
+			if msg['product_id'] == 'BTC-USD' and self.subscribeBTC:
+				for wskey in list(self.ctx.wss.connections):
+					self.ctx.wss.queues[wskey].append(json.dumps(msg))
+					log(f"self.queues = {self.queues}")
+			elif msg['product_id'] == 'ETH-USD' and self.subscribeETH:
+				for wskey in list(self.ctx.wss.connections):
+					self.ctx.wss.queues[wskey].append(json.dumps(msg))
+			elif msg['product_id'] in self.sendlist:#msg['product_id'] in self.channels and (self.channels[msg['product_id']].lookAtMePCT == True or self.channels[msg['product_id']].lookAtMeVOL == True):
+				for wskey in list(self.ctx.wss.connections):#NEED:sendlist is currently default GRT only
+					self.ctx.wss.queues[wskey].append(json.dumps(msg))
+			
+			#print(f"{len(self.ctx.wss.queues[wskey])}")
+			self.update_channel(msg)
+
+		def on_close(ws):
+			log('Websocket connection closed')
+
+		self.CBX_FEED = websocket.WebSocketApp(
+			WS_CBX_FEED,
+			on_message=on_message
+		)
+		self.CBX_FEED.on_open = on_open
+		self.CBX_FEED.on_close = on_close
+		self.CBX_FEED.run_forever()
+
+	def restartCBX(self):
+		log(f"restartCBX")
+		if self.cbx_thread:
+			#self.cbx_thread.join()
+			#time.sleep(1)
+			self.cbx_thread=None
+			self.CBX_FEED=None
+		
+		self.cbx_thread = threading.Thread(target=self.subscribe_new)
+		#websocket_thread.daemon=True
+		log(f"calling cbx_thread.start()")
+		self.cbx_thread.start()
+
+	def sign_message(self,message):
+		message = hmac.new(API_SECRET.encode('utf-8'), message.encode('utf-8'), digestmod=hashlib.sha256).hexdigest()
+		return message
+
+if __name__=="__main__":
+	z25d=Z25d()
+	z25d.start()
+
+
+"""
+{
+    "best_ask": "111670.07",
+    "best_ask_size": "0.10681918",
+    "best_bid": "111670.06",
+    "best_bid_size": "0.01732166",
+    "high_24h": "111968.52",
+    "last_size": "0.00118205",
+    "low_24h": "110693.01",
+    "open_24h": "111042.13",
+    "price": "111670.06",
+    "product_id": "BTC-USD",
+    "sequence": 114244292687,
+    "side": "sell",
+    "time": "2025-10-25T23:17:05.912923Z",
+    "trade_id": 891776535,
+    "type": "ticker",
+    "volume_24h": "1423.09388994",
+    "volume_30d": "241615.25295228"
+}
+"""
