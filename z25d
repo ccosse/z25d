@@ -20,6 +20,7 @@ if True:
 	import z25WssMgr as wssMgr
 	import z25TxAcctMgr as acctMgr
 
+	SUBSCRIBE_ALL = False
 	CURRENCIES_URL = 'https://api.exchange.coinbase.com/currencies'
 	WS_CBX_FEED="wss://ws-feed.exchange.coinbase.com"
 
@@ -394,7 +395,10 @@ class Z25d:
 			if response[i]['details']['type'] == 'crypto':
 				#print(response[i]['id'])
 				self.currencies.append(response[i]['id'])
-				if True:
+				subscribeCondition=False
+				if response[i]['id']=='BTC' and self.subscribeBTC:subscribeCondition=True
+				if f"{response[i]['id']}-USD" in self.subscribed_products_list:subscribeCondition=True
+				if subscribeCondition or SUBSCRIBE_ALL:
 					self.subscribed_products_list.append(f"{response[i]['id']}-USD")
 					self.subscribed_products_string+=f"{response[i]['id']}-USD"
 					if i<len(response)-1:
