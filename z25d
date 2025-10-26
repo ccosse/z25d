@@ -326,7 +326,7 @@ class Z25d:
 
 		self.CBX_FEED=None
 		self.cbx_thread = None
-		self.subscribed_products_list=['BTC-USD']
+		self.subscribed_products_list=[]
 		self.subscribed_products_string=""
 		#
 		self.subscribeVol = True
@@ -349,18 +349,146 @@ class Z25d:
 		self.pctThresh = GLOBAL_PCT_THRESH
 		self.volThresh = GLOBAL_VOL_THRESH
 
+	def save_state(self):
+		log('save_state')
+		oufname='cbx.state'
+		try:
+			ouf=open(oufname,'w')
+			oufdict={}
+			count=0
+			for key in list(self.channels.keys()):
+				oufdict[key]=self.channels[key].get_data_for_export()
+				count+=1
+			ouf.write(json.dumps(oufdict))
+			ouf.close()
+			log(f"Wrote {count} channels to {oufname}")
+		except:
+			log(f"Error saving state: {sys.exc_info()}")
+	
+	def load_state(self):
+		log('load_state')
+		infname='cbx.state'
+		count=0
+		try:
+			inf=open(infname)
+			_channels=json.loads(inf.read())
+			inf.close()
+			for key in list(_channels.keys()):
+				try:
+					if key in list(self.channels.keys()):
+						self.channels[key].take_data_for_import(_channels[key])
+						count+=1
+					else:
+						self.channels[key]=Channel(_channels[key]['first_msg'])
+						self.channels[key].take_data_for_import(_channels[key])
+						count+=1
+				except:log(f"Error loading channel: {key} {sys.exc_info()}")
+			log(f"Loaded {count} channels from {infname}")
+		except:
+			log(f"Error loading state: {sys.exc_info()}")
+
 	def start(self):
+		response = requests.get(CURRENCIES_URL).json()
+		log(f"received {len(response)} currencies")
+		for i in range(len(response)):
+			if response[i]['details']['type'] == 'crypto':
+				#print(response[i]['id'])
+				self.currencies.append(response[i]['id'])
+				if True:
+					self.subscribed_products_list.append(f"{response[i]['id']}-USD")
+					self.subscribed_products_string+=f"{response[i]['id']}-USD"
+					if i<len(response)-1:
+						self.subscribed_products_string+=","
+
+		cycler_thread = threading.Thread(target=self.channel_cycler)
+		cycler_thread.start()
+		log(f"channel_cycler started")
 		asyncio.run(self.ctx.wss.xmain())
+
+	def cycle_channels(self):
+		log('cycling {} channels'.format(len(self.channels)))
+		collective_block_update = {'type':'collective_block_update',}
+		lookAtMeCountPCT = 0
+		lookAtMeCountVOL = 0
+		for c in self.channels.values():
+			#log('{} {} {:.3f}'.format(c.pid, c.count, float(c.price)))
+			retain = False
+			retain_reasons = []
+			block_update = c.cycle()
+
+			if c.pid == 'BTC-USD' and self.subscribeBTC:
+				retain_reasons.append(1)
+				retain = True
+			
+			if c.pid == 'ETH-USD' and self.subscribeETH:
+				retain_reasons.append(2)
+				retain = True
+			
+			if c.pid in self.sendlist:
+				retain_reasons.append(3)
+				retain = True
+
+			if c.lookAtMeVOL == True and self.subscribeVol:
+				lookAtMeCountVOL += 1
+				if self.subscribeVol == True:
+					retain_reasons.append(4)
+					retain = True
+			
+			if c.lookAtMePCT == True and self.subscribePct:
+				lookAtMeCountPCT += 1
+				if self.subscribePct == True:
+					retain_reasons.append(5)
+					retain = True
+
+			if c.balance == True and self.subscribeBal == True:
+				retain_reasons.append(6)
+				retain = True
+			
+			if c.subscribed == True:#ie manually subscribed, and persistent
+				retain_reasons.append(7)
+				retain = True	
+
+			if retain == True:
+				#log('retaining {} {}'.format(c.pid, retain_reasons))
+				collective_block_update[c.pid] = block_update
+
+		log('sendlist {}'.format(self.sendlist))
+		log('lookAtMeCountVOL: {} lookAtMeCountPCT: {}'.format(lookAtMeCountVOL,lookAtMeCountPCT))
+		#log(f"CONNECTIONS: {self.ctx.wss.connections}")
+		for wskey in list(self.ctx.wss.connections):
+			#log(f"appending block_update to queues: {wskey} {json.dumps(collective_block_update)}")
+			self.ctx.wss.queues[wskey].append(json.dumps(collective_block_update))
+
+	def channel_cycler(self):
+		#log('self.tnext = {:.2f} ({:.2f})'.format(self.tnext,(self.tnext-time.time())))
+		while not self.close_cycler_thread:
+			if time.time() > self.tnext:
+
+				self.cycle_channels()
+
+				now=datetime.datetime.now()
+				secs=now.second
+				until_top_of_minute=60-secs
+
+				self.tnext=time.time()+until_top_of_minute#put here so not called 2x from somewhere else during update
+				#log('self.tnext = {:.2f} ({:.2f})'.format(self.tnext,(self.tnext-time.time())))
+
+			dt=(self.tnext-time.time())
+			#log('sleeping for {:.2f} sec'.format(dt))
+			time.sleep(dt)
+		self.close_cycler_thread = False
 
 	def update_channel(self, msg):
 		#log(f"update_channel {msg['product_id']}")
 		if msg['product_id'] in list(self.channels):
 			#log(f"updating channel {msg['product_id']}")
 			rval = self.channels[msg['product_id']].update(msg)#rval=isNewForWatch (either Vol or Pct or Both)
-			sendFlag=True
+			sendFlag=False
 			if self.subscribePct == True and (rval == 2 or rval == 3):sendFlag=True
 			elif self.subscribeVol == True and (rval == 1 or rval == 3):sendFlag=True
-			log(f"sendFlag = {sendFlag}")
+			elif msg['product_id']=='BTC-USD' and self.subscribeBTC:sendFlag=True
+
+			#log(f"sendFlag = {sendFlag}")
 			if sendFlag == True:#0,1,2,3 no,newvol,newpct,newboth then we bring client up-to-date with this channel immedieately (vs top of minute) 1x
 				#good place to add b/c only called 1x on first NewForWatch
 				if not msg['product_id'] in self.sendlist:

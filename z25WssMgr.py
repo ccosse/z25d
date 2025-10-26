@@ -33,6 +33,13 @@ class Z25WSSMgr:
 				elif 'type' in list(msg.keys()) and msg['type']=='restartCBX':
 					log(msg['type'])
 					self.ctx.z25.restartCBX()
+				elif 'type' in list(msg.keys()) and msg['type']=='refresh_orders':
+					log(msg['type'])
+					for wskey in self.ctx.wss.connections:
+						orders=json.dumps({'type':'refresh_orders','orders':self.ctx.acct.refresh_orders()})
+						log(orders)
+						self.ctx.wss.queues[wskey].append(orders)
+						
 			except:
 				#log(sys.exc_info())
 				self.connections={}

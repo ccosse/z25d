@@ -112,7 +112,8 @@ class Z25TxAcctMgr:
 	def __init__(self):
 		print("Z25TxAcctMgr")
 		self.ctx=None
-		self.accts=None
+		self.accts=[]
+		self.orders=[]
 
 	def refresh_accounts(self):
 		creds = load_creds()
@@ -156,4 +157,52 @@ class Z25TxAcctMgr:
 
 	def takeCtx(self,ctx):
 		self.ctx=ctx
+
+	def refresh_orders(self):
+		"""Fetch historical orders via JWT; returns a list[dict]."""
+		creds = load_creds()
+		api_key = creds.get('api-key') or creds.get('api_key') or ""
+		exp_s = int(creds.get('jwt_exp_s', 120))
+		priv_sources = {
+			"private_key_b64": creds.get("private_key_b64") or creds.get("private_key"),
+			"private_key_hex": creds.get("private_key_hex"),
+			"private_key_pem": creds.get("private_key_pem"),
+			"private_key_openssh": creds.get("private_key_openssh"),
+		}
+		key = ed25519_from_sources(priv_sources)
+		if not key:
+			print("[orders] No Ed25519 key available for JWT")
+			return []
+
+		from urllib.parse import urlencode
+		path = "/api/v3/brokerage/orders/historical/batch"
+		cursor = None
+		all_orders = []
+
+		while True:
+			params = {}
+			if cursor: params["cursor"] = cursor
+			q = "?" + urlencode(params) if params else ""
+			# JWT must include exact METHOD, HOST, PATH, and QUERY used
+			tok, _, _ = jwt_cdp(api_key, key, exp_s=exp_s, method="GET", path=path, query=q)
+			r = do_request_with_bearer(tok, path=path, params=params)
+			if r.status_code != 200:
+				print("[orders] HTTP", r.status_code, r.text[:240])
+				return all_orders
+
+			data = r.json()
+			if isinstance(data, str):
+				import json as _json
+				data = _json.loads(data)
+
+			orders = data.get("orders", [])
+			all_orders.extend(orders)
+			if not data.get("has_next"):
+				break
+			cursor = data.get("cursor")
+			self.orders=all_orders
+
+		open_orders = [o for o in all_orders if str(o.get("status")).upper() == "OPEN"]
+		return open_orders
+		#return all_orders
 
