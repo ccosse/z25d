@@ -20,7 +20,7 @@ if True:
 	import z25WssMgr as wssMgr
 	import z25TxAcctMgr as acctMgr
 
-	SUBSCRIBE_ALL = False
+	SUBSCRIBE_ALL = True
 	CURRENCIES_URL = 'https://api.exchange.coinbase.com/currencies'
 	WS_CBX_FEED="wss://ws-feed.exchange.coinbase.com"
 
@@ -185,6 +185,9 @@ class Channel:
 			self.data.append(cstk)
 		self.report()
 	
+	def getPrice(self):
+		return self.price
+	
 	def get_data_for_export(self):
 		#self.data=[]
 		cstk_data=[]
@@ -327,7 +330,7 @@ class Z25d:
 
 		self.CBX_FEED=None
 		self.cbx_thread = None
-		self.subscribed_products_list=[]
+		self.subscribed_products_list=['COOKIE-USD','SYND-USD','APR-USD','TREE-USD','RSR-USD']
 		self.subscribed_products_string=""
 		#
 		self.subscribeVol = True
@@ -387,8 +390,13 @@ class Z25d:
 			log(f"Loaded {count} channels from {infname}")
 		except:
 			log(f"Error loading state: {sys.exc_info()}")
-
+	def getChannel(self,pid):
+		print(f"z25d.getChannel: {pid}")
+		print(f"{self.channels.keys()}")
+		return self.channels[pid]
+	
 	def start(self):
+		self.load_state()
 		response = requests.get(CURRENCIES_URL).json()
 		log(f"received {len(response)} currencies")
 		for i in range(len(response)):
@@ -689,8 +697,10 @@ class Z25d:
 
 if __name__=="__main__":
 	z25d=Z25d()
-	z25d.start()
-
+	try:
+		z25d.start()
+	except:
+		z25d.save_state()
 
 """
 {

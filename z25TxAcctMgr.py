@@ -206,3 +206,220 @@ class Z25TxAcctMgr:
 		return open_orders
 		#return all_orders
 
+	def place_order(self, msg: dict) -> dict:
+		"""
+		Minimal change:
+		  - Read price from the *-USD* channel (unchanged)
+		  - Place the order on the *-USDC* book when a *-USD* product is requested
+		Supports: amt in <num>|MAX|MX2; type=M|L with limit in % or price.
+		"""
+		import uuid, json, requests, math
+
+		def dbg(*a): print("[place_order]", *a)
+
+		# --- auth helper -----------------------------------------------------
+		def _jwt(method, path, query=""):
+			creds = load_creds()
+			api_key = creds.get('api-key') or creds.get('api_key') or ""
+			exp_s = int(creds.get('jwt_exp_s', 120))
+			key = ed25519_from_sources({
+				"private_key_b64": creds.get("private_key_b64") or creds.get("private_key"),
+				"private_key_hex": creds.get("private_key_hex"),
+				"private_key_pem": creds.get("private_key_pem"),
+				"private_key_openssh": creds.get("private_key_openssh"),
+			})
+			if not key:
+				raise RuntimeError("No Ed25519 key available for JWT")
+			return jwt_cdp(api_key, key, exp_s=exp_s, method=method, path=path, query=query)[0]
+
+		def _jsonify(resp):
+			try:
+				j = resp.json()
+				if isinstance(j, str): j = json.loads(j)
+				return j
+			except Exception:
+				return {"error": resp.text}
+
+		# --- balances --------------------------------------------------------
+		def _scan_bal(accts, ccy: str) -> float:
+			for acc in accts or []:
+				if str(acc.get("currency")).upper() == ccy.upper():
+					try: return float(acc["available_balance"]["value"])
+					except: pass
+			return 0.0
+
+		def _get_bal(ccy: str) -> float:
+			if hasattr(self, "accts") and self.accts:
+				src = self.accts if isinstance(self.accts, list) else self.accts.get("accounts")
+				v = _scan_bal(src, ccy)
+				if v: return v
+			path = "/api/v3/brokerage/accounts"
+			tok = _jwt("GET", path, "")
+			r = requests.get(f"https://api.coinbase.com{path}?limit=250",
+							 headers={"Authorization": f"Bearer {tok}"}, timeout=12)
+			if r.status_code == 200:
+				return _scan_bal(_jsonify(r).get("accounts"), ccy)
+			return 0.0
+
+		# --- product increments & formatting --------------------------------
+		def _product_increments(pid: str):
+			try:
+				path = f"/api/v3/brokerage/products/{pid}"
+				tok = _jwt("GET", path, "")
+				r = requests.get(f"https://api.coinbase.com{path}",
+								 headers={"Authorization": f"Bearer {tok}"}, timeout=10)
+				if r.status_code != 200:
+					dbg("prod meta HTTP", r.status_code, r.text[:160]); raise RuntimeError("prod meta fail")
+				j = _jsonify(r)
+				bi = float(j.get("base_increment") or 1e-6)
+				qi = float(j.get("quote_increment") or 0.01)
+				return bi, qi
+			except Exception as e:
+				dbg("prod meta error:", e, "→ using defaults")
+				return 1e-6, 0.01
+
+		def _quantize_floor(value: float, inc: float) -> float:
+			if inc <= 0: return value
+			return math.floor(value / inc) * inc
+
+		def _fmt_by_inc(x: float, inc: float) -> str:
+			s = f"{inc:.12f}".rstrip('0').rstrip('.')
+			decimals = len(s.split('.')[1]) if '.' in s else 0
+			return f"{x:.{decimals}f}"
+
+		# --- parse inputs ----------------------------------------------------
+		dbg("incoming msg:", msg)
+		try:
+			pid_in = str(msg.get("pid"))
+			side   = "BUY" if str(msg.get("side","B")).upper().startswith("B") else "SELL"
+			o_typ  = str(msg.get("type","M")).upper()
+			amt_s  = str(msg.get("amt")).strip()
+			lim_s  = (str(msg.get("limit")).strip() if msg.get("limit") is not None else None)
+			base_ccy, quote_ccy_in = pid_in.split("-")[0].upper(), pid_in.split("-")[1].upper()
+		except Exception as e:
+			return {"ok": False, "error": f"parse_error:{e}"}
+		dbg("parsed:", dict(pid=pid_in, side=side, type=o_typ, amt=amt_s, limit=lim_s))
+
+		# --- PRICE SOURCE: always the -USD channel (as requested) -----------
+		price_pid = pid_in  # keep *-USD* for price lookup
+		try:
+			ch = self.ctx.z25.getChannel(price_pid)
+			last_px = float(ch.getPrice())
+			best_bid = best_ask = last_px
+			dbg("ctx price (from USD book):", last_px)
+		except Exception as e:
+			return {"ok": False, "error": f"ctx_price_error:{e}"}
+
+		# --- ORDER MARKET: switch *-USD → *-USDC only for placement ----------
+		if pid_in.endswith("-USD"):
+			order_pid = f"{base_ccy}-USDC"
+			order_quote = "USDC"
+			dbg("placing on USDC market:", order_pid, "(price from", price_pid, ")")
+		else:
+			order_pid = pid_in
+			order_quote = quote_ccy_in
+
+		# increments for the order product (USDC if switched)
+		base_inc, quote_inc = _product_increments(order_pid)
+		dbg("increments:", dict(base_increment=base_inc, quote_increment=quote_inc))
+
+		# --- limit price -----------------------------------------------------
+		try:
+			limit_price = None
+			if o_typ == "L":
+				if lim_s is None:
+					return {"ok": False, "error": "limit_missing for LIMIT order"}
+				if lim_s.endswith("%"):
+					pct = float(lim_s[:-1]) / 100.0
+					ref = best_ask if side == "BUY" else best_bid
+					raw_px = ref * (1.0 + pct) if side == "BUY" else ref * (1.0 - pct)
+				else:
+					raw_px = float(lim_s)
+				# quantize to the ORDER market's quote increment (USDC if switched)
+				limit_price = _quantize_floor(raw_px, quote_inc)
+				dbg("limit_price(raw→quantized for order market):", raw_px, "→", limit_price)
+		except Exception as e:
+			return {"ok": False, "error": f"limit_parse_error:{e}"}
+
+		# --- amount in quote currency (now USDC if switched) -----------------
+		def _quote_amount():
+			u = amt_s.upper()
+			if u in ("MAX","MX2"):
+				factor = 0.5 if u == "MX2" else 1.0
+				if side == "BUY":
+					q_bal = _get_bal(order_quote); dbg(f"{order_quote} balance:", q_bal)
+					return max(0.0, q_bal * factor)
+				else:
+					b_bal = _get_bal(base_ccy)
+					ref_px = (limit_price if (o_typ == "L" and limit_price is not None) else best_bid)
+					dbg("base balance:", b_bal, "ref_px:", ref_px)
+					return max(0.0, b_bal * ref_px * factor)
+			return float(amt_s)
+
+		try:
+			quote_amt = _quote_amount()
+			dbg("quote_amt (order quote currency):", quote_amt, order_quote)
+			if quote_amt <= 0: return {"ok": False, "error": "amount_not_positive"}
+		except Exception as e:
+			return {"ok": False, "error": f"amount_error:{e}"}
+
+		# --- size math (quantized) ------------------------------------------
+		def _base_from_quote(ref_px: float) -> float:
+			if ref_px <= 0: raise ValueError("invalid reference price")
+			return quote_amt / ref_px
+
+		# --- build order body -----------------------------------------------
+		try:
+			body = {
+				"client_order_id": str(uuid.uuid4()),
+				"product_id": order_pid,   # <-- place on *-USDC if switched
+				"side": side,
+				"order_configuration": {}
+			}
+
+			if o_typ == "M":
+				if side == "BUY":
+					q_funds = _quantize_floor(quote_amt, quote_inc)
+					cfg = {"quote_size": _fmt_by_inc(q_funds, quote_inc)}
+					body["order_configuration"]["market_market_ioc"] = cfg
+					dbg("market BUY by quote:", cfg)
+				else:
+					ref_px = best_bid  # conservative for sizing
+					raw_size = _base_from_quote(ref_px)
+					q_size = _quantize_floor(raw_size, base_inc)
+					q_size = min(q_size, _quantize_floor(_get_bal(base_ccy), base_inc))
+					cfg = {"base_size": _fmt_by_inc(q_size, base_inc)}
+					body["order_configuration"]["market_market_ioc"] = cfg
+					dbg("market SELL base_size(raw→quantized):", raw_size, "→", q_size)
+			else:
+				px = float(limit_price)
+				raw_size = _base_from_quote(px)
+				q_size = _quantize_floor(raw_size, base_inc)
+				if side == "SELL":
+					q_size = min(q_size, _quantize_floor(_get_bal(base_ccy), base_inc))
+				cfg = {
+					"base_size": _fmt_by_inc(q_size, base_inc),
+					"limit_price": _fmt_by_inc(px, quote_inc),
+					"post_only": False
+				}
+				body["order_configuration"]["limit_limit_gtc"] = cfg
+				dbg("limit cfg:", cfg)
+		except Exception as e:
+			return {"ok": False, "error": f"build_body_error:{e}"}
+
+		# --- POST ------------------------------------------------------------
+		try:
+			path = "/api/v3/brokerage/orders"
+			tok  = _jwt("POST", path, "")
+			url  = f"https://api.coinbase.com{path}"
+			dbg("POST", url, "body:", body)
+			r = requests.post(url,
+							  headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+							  data=json.dumps(body), timeout=20)
+			j = _jsonify(r)
+			dbg("HTTP", r.status_code, "resp_head:", str(j)[:160])
+			if r.status_code != 200:
+				return {"ok": False, "status": r.status_code, "resp": j, "sent": body}
+			return j
+		except Exception as e:
+			return {"ok": False, "error": f"http_exception:{e}", "sent": body}

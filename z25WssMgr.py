@@ -1,6 +1,7 @@
 import asyncio, ssl, sys, websockets, json
 import AppContext as appContext
 
+USE_WSS=False
 HOST="localhost"
 PORT=7879
 
@@ -39,7 +40,14 @@ class Z25WSSMgr:
 						orders=json.dumps({'type':'refresh_orders','orders':self.ctx.acct.refresh_orders()})
 						log(orders)
 						self.ctx.wss.queues[wskey].append(orders)
-						
+				elif 'type' in list(msg.keys()) and msg['type']=='L':#Limit
+					log(msg)
+					rval = self.ctx.acct.place_order(msg)
+					log(rval)
+				elif 'type' in list(msg.keys()) and msg['type']=='M':#Market
+					log(msg)
+					rval = self.ctx.acct.place_order(msg)
+					log(rval)
 			except:
 				#log(sys.exc_info())
 				self.connections={}
@@ -148,6 +156,11 @@ class Z25WSSMgr:
 	async def xmain(self):
 		CERT, KEY = "localhost+2.pem", "localhost+2-key.pem"
 		ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(CERT, KEY)
-		async with websockets.serve(self.handler, HOST, PORT, ssl=ctx):
-			log('calling await ... ')
-			await asyncio.Future()
+		if USE_WSS:
+			async with websockets.serve(self.handler, HOST, PORT, ssl=ctx):
+				log('calling await ... ')
+				await asyncio.Future()
+		else:
+			async with websockets.serve(self.handler, HOST, PORT):
+				log('calling await ... ')
+				await asyncio.Future()
