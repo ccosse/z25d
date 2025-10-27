@@ -1,7 +1,7 @@
 import asyncio, ssl, sys, websockets, json
 import AppContext as appContext
 
-USE_WSS=False
+USE_WSS=True
 HOST="localhost"
 PORT=7879
 
