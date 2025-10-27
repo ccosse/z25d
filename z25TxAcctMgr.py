@@ -208,10 +208,10 @@ class Z25TxAcctMgr:
 
 	def place_order(self, msg: dict) -> dict:
 		"""
-		Minimal change:
-		  - Read price from the *-USD* channel (unchanged)
-		  - Place the order on the *-USDC* book when a *-USD* product is requested
-		Supports: amt in <num>|MAX|MX2; type=M|L with limit in % or price.
+		Price comes from *-USD* channel. Order placed on *-USDC* book.
+		Percent limits are passive by default:
+		  BUY: price*(1 - pct), SELL: price*(1 + pct)
+		Supports amt in <num>|MAX|MX2 and type in M|L.
 		"""
 		import uuid, json, requests, math
 
@@ -300,8 +300,8 @@ class Z25TxAcctMgr:
 			return {"ok": False, "error": f"parse_error:{e}"}
 		dbg("parsed:", dict(pid=pid_in, side=side, type=o_typ, amt=amt_s, limit=lim_s))
 
-		# --- PRICE SOURCE: always the -USD channel (as requested) -----------
-		price_pid = pid_in  # keep *-USD* for price lookup
+		# --- price source: ALWAYS from -USD channel --------------------------
+		price_pid = pid_in
 		try:
 			ch = self.ctx.z25.getChannel(price_pid)
 			last_px = float(ch.getPrice())
@@ -310,7 +310,7 @@ class Z25TxAcctMgr:
 		except Exception as e:
 			return {"ok": False, "error": f"ctx_price_error:{e}"}
 
-		# --- ORDER MARKET: switch *-USD → *-USDC only for placement ----------
+		# --- order market: place on -USDC if input is -USD -------------------
 		if pid_in.endswith("-USD"):
 			order_pid = f"{base_ccy}-USDC"
 			order_quote = "USDC"
@@ -319,11 +319,11 @@ class Z25TxAcctMgr:
 			order_pid = pid_in
 			order_quote = quote_ccy_in
 
-		# increments for the order product (USDC if switched)
+		# increments for the order product
 		base_inc, quote_inc = _product_increments(order_pid)
 		dbg("increments:", dict(base_increment=base_inc, quote_increment=quote_inc))
 
-		# --- limit price -----------------------------------------------------
+		# --- limit price (passive by default) --------------------------------
 		try:
 			limit_price = None
 			if o_typ == "L":
@@ -331,17 +331,16 @@ class Z25TxAcctMgr:
 					return {"ok": False, "error": "limit_missing for LIMIT order"}
 				if lim_s.endswith("%"):
 					pct = float(lim_s[:-1]) / 100.0
-					ref = best_ask if side == "BUY" else best_bid
-					raw_px = ref * (1.0 + pct) if side == "BUY" else ref * (1.0 - pct)
+					# passive logic: BUY below, SELL above
+					raw_px = last_px * (1.0 - pct) if side == "BUY" else last_px * (1.0 + pct)
 				else:
 					raw_px = float(lim_s)
-				# quantize to the ORDER market's quote increment (USDC if switched)
 				limit_price = _quantize_floor(raw_px, quote_inc)
 				dbg("limit_price(raw→quantized for order market):", raw_px, "→", limit_price)
 		except Exception as e:
 			return {"ok": False, "error": f"limit_parse_error:{e}"}
 
-		# --- amount in quote currency (now USDC if switched) -----------------
+		# --- amount in quote currency (USDC if switched) ---------------------
 		def _quote_amount():
 			u = amt_s.upper()
 			if u in ("MAX","MX2"):
@@ -372,7 +371,7 @@ class Z25TxAcctMgr:
 		try:
 			body = {
 				"client_order_id": str(uuid.uuid4()),
-				"product_id": order_pid,   # <-- place on *-USDC if switched
+				"product_id": order_pid,
 				"side": side,
 				"order_configuration": {}
 			}
@@ -384,7 +383,7 @@ class Z25TxAcctMgr:
 					body["order_configuration"]["market_market_ioc"] = cfg
 					dbg("market BUY by quote:", cfg)
 				else:
-					ref_px = best_bid  # conservative for sizing
+					ref_px = best_bid
 					raw_size = _base_from_quote(ref_px)
 					q_size = _quantize_floor(raw_size, base_inc)
 					q_size = min(q_size, _quantize_floor(_get_bal(base_ccy), base_inc))
