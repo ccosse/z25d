@@ -558,7 +558,7 @@ class Z25d:
 					"price": msg["price"],
 					"product_id": msg["product_id"],
 					"sequence": msg["sequence"],
-					"side": "sell",
+					"side": msg["side"],
 					"time": msg["time"],
 					"trade_id": 0,
 					"type": "ticker",
@@ -701,6 +701,7 @@ if __name__=="__main__":
 		z25d.start()
 	except:
 		z25d.save_state()
+		sys.exit()
 
 """
 {
