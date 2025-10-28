@@ -60,6 +60,7 @@ class Candlestick:
 		self.t0 = str(datetime.datetime.now().astimezone(timezone('UTC'))).replace(' ','T')
 		self.tlast = str(datetime.datetime.now().astimezone(timezone('UTC'))).replace(' ','T')#THIS IS WHAT WE PLOT (slides)
 		self.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) + datetime.timedelta(minutes=1)).replace(' ','T')
+		self.time_last = time.time()
 
 	def get(self):
 		return self.__dict__
@@ -317,6 +318,7 @@ class Z25d:
 		self.channels={}
 		self.sendlist = []
 		self.currencies=[]
+		self.hotlist={}
 		#
 		wss = wssMgr.Z25WSSMgr()
 		acct = acctMgr.Z25TxAcctMgr()
@@ -396,8 +398,69 @@ class Z25d:
 		print(f"{self.channels.keys()}")
 		return self.channels[pid]
 	
+	def update_hotlist(self,pid):
+		try:
+			score=4
+			c=self.getChannel(pid)
+			dt = time.time() - c.data[0].time_last
+			log(f"update_hotlist: {pid} {dt}")
+			
+			#check if fish-on!
+			criteria0 = c.data[0].PricePctChange>1.5
+			criteria1 = c.data[0].PricePctChange>1 and c.data[1].PricePctChange>0.85 and c.data[2].PricePctChange>0
+			criteria2 = (dt < 15) and c.data[0].PricePctChange>0.5 and c.data[1].PricePctChange>0.85 and c.data[2].PricePctChange>0
+			criteria3 = (dt < 30) and c.data[0].PricePctChange>1.0 and c.data[1].PricePctChange>0.85 and c.data[2].PricePctChange>0
+			if score==4:
+				if criteria0 or criteria1 or criteria2 or criteria3:
+					#print('{} {} {}'.format(criteria1,criteria2,criteria3))
+					if time.time()-c['tlast_text_message'] > self.text_message_speed_limit:
+						msg_text='!!! FISH-ON (UP) !!! http://pro.coinbase.com/trade/{}  {} {} {} {}'.format(pid,criteria0,criteria1,criteria2,criteria3)
+						log(msg_text)
+						if self.texting_enabled and float(c['buy_usd_total'])/1E6 > 0.01:
+							self.send_text(pid,msg_text)
+						c['tlast_text_message']=time.time()
+			sorted_keys=list(self.hotlist.keys())
+			if pid in self.hotlist.keys():
+				self.hotlist[pid]['score']=score
+				self.hotlist[pid]['channel']=c
+				if score > self.hotlist[pid]['high_score']:
+					self.hotlist[pid]['high_score']=score
+				#log('updated {}'.format(pid))
+			else:
+				self.hotlist[pid]={'score':0,'high_score':0,'channel':c}
+				#log('added {}'.format(pid))
+
+			#do sort here to upgrade last item, else just pops off and doesn't make list
+			kvlist={}
+			for k,v in self.hotlist.items():
+				kvlist[k]=v['score']+v['high_score']#sorting by score+high_score -> avoids 2 nested sorts w/ almost same result
+			hotkvs={k: v for k, v in sorted(kvlist.items(), key=lambda item: item[1])}
+			sorted_keys=list(hotkvs.keys())#higher score first
+			sorted_keys.reverse()
+			#log(sorted_keys)
+			while len(sorted_keys) > 10:
+				sk=sorted_keys.pop()
+				del(self.hotlist[sk])#changed from pid -> sk
+				#log('removed {}'.format(sk))
+			#now, after have desired list, want to sort from + -> - by price_history[0][5] (this works beautifully)
+			kvlist={}
+			for k,v in self.hotlist.items():
+				kvlist[k]=v['channel'].data[0].PricePctChange
+			hotkvs={k: v for k, v in sorted(kvlist.items(), key=lambda item: item[1])}
+			sorted_keys=list(hotkvs.keys())#higher score first
+			sorted_keys.reverse()
+			msg={
+				'type':'update_hotlist',
+				'sorted_keys':sorted_keys,
+				#'hotlist':self.hotlist,#dict
+			}
+			return json.dumps(msg)
+		except:
+			log(sys.exc_info())
+		return {}
+		
 	def start(self):
-		#self.load_state()
+		self.load_state()
 		response = requests.get(CURRENCIES_URL).json()
 		log(f"received {len(response)} currencies")
 		for i in range(len(response)):
@@ -525,6 +588,11 @@ class Z25d:
 			#log(f"Channel = {c.pid} Balance = {c.balance}")
 			self.channels[c.pid] = c#Channel(msg)#does update
 			#log(self.channels[c.pid])
+		#log(f"calling update_hotlist {msg['product_id']}")
+		
+		#102825 HOTLIST:
+		#rval = self.update_hotlist(msg['product_id'])
+		#log(rval)
 
 	def subscribe_new(self):
 		channel = 'ticker'
