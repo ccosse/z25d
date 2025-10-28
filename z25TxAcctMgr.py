@@ -422,3 +422,16 @@ class Z25TxAcctMgr:
 			return j
 		except Exception as e:
 			return {"ok": False, "error": f"http_exception:{e}", "sent": body}
+
+	def report(self):
+		print(f"z25TxAcctMgr.report")
+
+	def getCBX(self):
+		self.refresh_accounts()		
+		for acct in list(self.accts):
+			pid=acct["currency"]+"-USD"
+			try:
+				self.ctx.z25.channels[pid].balance = float(acct['available_balance']['value']) + float(acct['hold']['value'])
+			except:
+				print(f"NO CHANNEL FOR: {pid} {sys.exc_info()}")
+		return self.accts

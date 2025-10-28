@@ -8,6 +8,9 @@ PORT=7879
 def log(msg):
 	print(f"{msg}")
 
+def plog(_x):#pretty log
+	print(json.dumps(_x, indent=4, sort_keys=True))
+
 class Z25WSSMgr:
 	def __init__(self):
 		print("Z25WSSMgr")
@@ -48,6 +51,23 @@ class Z25WSSMgr:
 					log(msg)
 					rval = self.ctx.acct.place_order(msg)
 					log(rval)
+				elif 'type' in list(msg.keys()) and msg['type']=='refresh_accounts':
+					accts = self.ctx.acct.getCBX()#list of dicts
+					rval=json.dumps({'type':'refresh_accounts','value':accts})
+					plog(rval)
+					for wskey in self.ctx.wss.connections:
+						self.ctx.wss.queues[wskey].append(rval)
+				elif 'type' in list(msg.keys()) and msg['type']=='clearLookAtMe':
+					self.ctx.z25.clearLookAtMe()
+				elif 'type' in list(msg.keys()) and msg['type']=='subscribe':
+					self.ctx.z25.subscribe(msg['pid'])
+				elif 'type' in list(msg.keys()) and msg['type']=='unsubscribe':
+					self.ctx.z25.unsubscribe(msg['pid'])
+				elif 'type' in list(msg.keys()) and msg['type']=='report':
+					self.ctx.z25.report()
+					self.report()
+					self.ctx.wss.report()
+					
 			except:
 				#log(sys.exc_info())
 				self.connections={}
@@ -154,6 +174,7 @@ class Z25WSSMgr:
 		asyncio.run(main())
 	"""
 	async def xmain(self):
+
 		CERT, KEY = "localhost+2.pem", "localhost+2-key.pem"
 		ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(CERT, KEY)
 		if USE_WSS:
@@ -164,3 +185,6 @@ class Z25WSSMgr:
 			async with websockets.serve(self.handler, HOST, PORT):
 				log('calling await ... ')
 				await asyncio.Future()
+	
+	def report(self):
+		print(f"z25WssMgr.report")

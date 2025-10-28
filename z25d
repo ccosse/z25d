@@ -390,13 +390,14 @@ class Z25d:
 			log(f"Loaded {count} channels from {infname}")
 		except:
 			log(f"Error loading state: {sys.exc_info()}")
+
 	def getChannel(self,pid):
 		print(f"z25d.getChannel: {pid}")
 		print(f"{self.channels.keys()}")
 		return self.channels[pid]
 	
 	def start(self):
-		self.load_state()
+		#self.load_state()
 		response = requests.get(CURRENCIES_URL).json()
 		log(f"received {len(response)} currencies")
 		for i in range(len(response)):
@@ -694,6 +695,18 @@ class Z25d:
 		#log('lookAtMeCountVOL: {} lookAtMeCountPCT: {}'.format(lookAtMeCountVOL,lookAtMeCountPCT))
 		for wskey in list(self.ctx.wss.connections):
 			self.ctx.wss.queues[wskey].append(json.dumps(collective_block_update))
+
+	def clearLookAtMe(self):
+		print(f"z25.clearLookAtMe")
+
+	def subscribe(self, pid):
+		self.channels[pid].subscribed=True
+
+	def unsubscribe(self, pid):
+		self.channels[pid].subscribed=False
+
+	def report(self):
+		print(f"z25.report")
 
 if __name__=="__main__":
 	z25d=Z25d()
