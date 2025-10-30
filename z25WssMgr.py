@@ -20,6 +20,12 @@ class Z25WSSMgr:
 		self.THE_M22 = {}
 		self.messages_sent = 0
 
+	def report(self):
+		log("z25WssMgr.report:")
+		print(f"messages_sent: {self.messages_sent}")
+		print(f"self.connections: {self.connections.keys()}")
+		print(f"self.queues: {self.queues.keys()}")
+
 	def takeCtx(self,ctx):
 		self.ctx=ctx
 
@@ -34,6 +40,11 @@ class Z25WSSMgr:
 				if 'type' in list(msg.keys()) and msg['type']=='associate':
 					log(msg['type'])
 					log('association success!')
+				elif 'type' in list(msg.keys()) and msg['type']=='get_all_channels':
+					log(msg['type'])
+					self.ctx.z25.getAllChannels()
+				elif 'type' in list(msg.keys()) and msg['type']=='send_settings':
+					self.ctx.z25.take_settings(msg)
 				elif 'type' in list(msg.keys()) and msg['type']=='restartCBX':
 					log(msg['type'])
 					self.ctx.z25.restartCBX()
@@ -66,7 +77,7 @@ class Z25WSSMgr:
 				elif 'type' in list(msg.keys()) and msg['type']=='report':
 					self.ctx.z25.report()
 					self.report()
-					self.ctx.wss.report()
+					self.ctx.acct.report()
 					
 			except:
 				#log(sys.exc_info())
@@ -103,6 +114,10 @@ class Z25WSSMgr:
 	async def handler(self,websocket):
 		#log('handler')
 		if not websocket in list(self.queues):
+			print(f"resetting connections and queues")
+			self.queues={}
+			self.connections={}
+			print(f"adding new connection")
 			self.queues[websocket]=[]
 			self.connections[websocket]={}
 		
@@ -186,5 +201,3 @@ class Z25WSSMgr:
 				log('calling await ... ')
 				await asyncio.Future()
 	
-	def report(self):
-		print(f"z25WssMgr.report")

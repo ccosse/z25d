@@ -114,6 +114,7 @@ class Z25TxAcctMgr:
 		self.ctx=None
 		self.accts=[]
 		self.orders=[]
+		self.order_keys=[]
 
 	def refresh_accounts(self):
 		creds = load_creds()
@@ -153,7 +154,6 @@ class Z25TxAcctMgr:
 					for acct in self.accts:
 						print(f"{acct['currency']}\t{acct['available_balance']['value']}\t{acct['hold']['value']}")
 					return 
-
 
 	def takeCtx(self,ctx):
 		self.ctx=ctx
@@ -200,9 +200,13 @@ class Z25TxAcctMgr:
 			if not data.get("has_next"):
 				break
 			cursor = data.get("cursor")
-			self.orders=all_orders
 
 		open_orders = [o for o in all_orders if str(o.get("status")).upper() == "OPEN"]
+		self.order_keys=[]
+		for oidx in range(len(open_orders)):
+			print(open_orders[oidx])
+			self.order_keys.append(open_orders[oidx]["product_id"].replace('-USDC','-USD'))
+		self.orders=open_orders
 		return open_orders
 		#return all_orders
 
@@ -425,7 +429,9 @@ class Z25TxAcctMgr:
 
 	def report(self):
 		print(f"z25TxAcctMgr.report")
-
+		print(f"accts: {len(self.accts)}")
+		print(f"orders: {len(self.orders)}")
+		print(f"order_keys: {self.order_keys}")
 	def getCBX(self):
 		self.refresh_accounts()		
 		for acct in list(self.accts):

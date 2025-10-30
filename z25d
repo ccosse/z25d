@@ -34,8 +34,8 @@ if True:
 	API_KEY = key_public#PUBLIC
 	API_SECRET = key_secret#SIGNING
 
-	GLOBAL_VOL_THRESH = 20
-	GLOBAL_PCT_THRESH = 0.85
+	GLOBAL_VOL_THRESH = 40
+	GLOBAL_PCT_THRESH = 1.0
 	DEFAULT_NBIN = 100
 	DEFAULT_DT = 60
 
@@ -99,14 +99,14 @@ class Candlestick:
 			if math.fabs(self.PricePctChange) > self.pctThresh:
 				lookAtMe = True
 				#log('{} {} {} {}'.format(self.PID,self.PricePctChange,self.pctThresh,math.fabs(self.PricePctChange) > self.pctThresh))
-			#
-			if True:#WS_CBX_FEED==OLD_WS_FEED:
-				if MSG['side'] == 'sell':
-					self.SellUSD += float(MSG['last_size'])*float(MSG['price'])
-					self.SellVOL += float(MSG['last_size'])
-				elif MSG['side'] == 'buy':
-					self.BuyUSD += float(MSG['last_size'])*float(MSG['price'])
-					self.BuyVOL += float(MSG['last_size'])
+				print(f"{self.PID} {self.PricePctChange} {self.pctThresh} {math.fabs(self.PricePctChange) > self.pctThresh}")
+
+			if MSG['side'] == 'sell':
+				self.SellUSD += float(MSG['last_size'])*float(MSG['price'])
+				self.SellVOL += float(MSG['last_size'])
+			elif MSG['side'] == 'buy':
+				self.BuyUSD += float(MSG['last_size'])*float(MSG['price'])
+				self.BuyVOL += float(MSG['last_size'])
 
 		except:
 			log(f"CSTK update: {sys.exc_info()}")
@@ -218,7 +218,7 @@ class Channel:
 		try:
 			#log('update {}\t{}'.format(self.pid, msg['price']))
 			if msg.get("type") != "ticker": 
-				return
+				return 0
 			self.count += 1
 			self.price = float(msg.get("price", 0.0) or 0.0)
 			#self.price = float(msg['price'])
@@ -240,11 +240,11 @@ class Channel:
 					cstk.t0 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=cidx)).replace(' ','T')
 					cstk.t1 = str(datetime.datetime.now().astimezone(timezone('UTC')) - datetime.timedelta(minutes=(cidx+1))).replace(' ','T')
 					self.data.append(cstk)
-				return
+				return 0
 
 			rval = self.data[0].update(msg)#update the leading candlestick; returns lookAtMe
 			#log('rval {}'.format(rval))
-			isNewForWatch = 0
+			isNewForWatch = 0#1=Vol,2=Pct,3=Vol&&Pct
 			if rval == True:
 				if not self.lookAtMePCT:
 					#log('PCT lookAtMe {}'.format(self.pid))
@@ -269,7 +269,7 @@ class Channel:
 		except:
 			log(f"Channel.update: {sys.exc_info()}")
 			dummy=input('Enter to continue')
-		return False
+		return 0
 	
 	def block_update(self):
 		# A lightweight snapshot overlay at top-of-minute; past histo data is just candlesticks; 
@@ -299,12 +299,11 @@ class Channel:
 	def cycle(self):
 		self.data.insert(0,Candlestick(self.price, {'product_id':self.pid, 'pctThresh': self.pctThresh}))
 		self.data.pop()
-		#self.report()
 		return self.block_update()
 
 	def report(self):
 		#log('report {} len(data): {}'.format(self.pid,len(self.data)))
-		oufline = '{}\t{:7d}'.format(self.pid, self.count)
+		log(f"Channel.report: {self.pid} count: {self.count} self.data: {len(self.data)}")
 		#for cidx in range(len(self.data)):
 		#	#log('cidx {}'.format(cidx))
 		#	oufline += '\t{:10.4f}'.format(self.data[cidx].Open)
@@ -332,7 +331,9 @@ class Z25d:
 
 		self.CBX_FEED=None
 		self.cbx_thread = None
-		self.subscribed_products_list=['COOKIE-USD','SYND-USD','APR-USD','TREE-USD','RSR-USD']
+		self.close_cycler_thread = False
+		self.close_cbx_thread = False
+		self.subscribed_products_list=[]
 		self.subscribed_products_string=""
 		#
 		self.subscribeVol = True
@@ -341,12 +342,6 @@ class Z25d:
 		self.subscribeBTC = True
 		self.subscribeETH = True
 		#
-
-		self.CBX_FEED=None
-		self.cbx_thread = None
-		self.close_cycler_thread = False
-		self.close_cbx_thread = False
-		#
 		now=datetime.datetime.now()
 		secs=now.second
 		until_top_of_minute=60-secs
@@ -354,6 +349,7 @@ class Z25d:
 		#
 		self.pctThresh = GLOBAL_PCT_THRESH
 		self.volThresh = GLOBAL_VOL_THRESH
+		self.t_last_ticker = time.time()
 
 	def save_state(self):
 		log('save_state')
@@ -379,7 +375,10 @@ class Z25d:
 			inf=open(infname)
 			_channels=json.loads(inf.read())
 			inf.close()
+			count=0
+			total=len(_channels.keys())
 			for key in list(_channels.keys()):
+				log(f"load_state loading {key} {count}/{total}")
 				try:
 					if key in list(self.channels.keys()):
 						self.channels[key].take_data_for_import(_channels[key])
@@ -388,7 +387,9 @@ class Z25d:
 						self.channels[key]=Channel(_channels[key]['first_msg'])
 						self.channels[key].take_data_for_import(_channels[key])
 						count+=1
-				except:log(f"Error loading channel: {key} {sys.exc_info()}")
+				except:
+					log(f"Error loading channel: {key} {sys.exc_info()}")
+					break
 			log(f"Loaded {count} channels from {infname}")
 		except:
 			log(f"Error loading state: {sys.exc_info()}")
@@ -506,34 +507,38 @@ class Z25d:
 
 			if c.lookAtMeVOL == True and self.subscribeVol:
 				lookAtMeCountVOL += 1
-				if self.subscribeVol == True:
-					retain_reasons.append(4)
-					retain = True
+				retain_reasons.append(4)
+				retain = True
 			
 			if c.lookAtMePCT == True and self.subscribePct:
 				lookAtMeCountPCT += 1
-				if self.subscribePct == True:
-					retain_reasons.append(5)
-					retain = True
-
+				retain_reasons.append(5)
+				retain = True
+			"""
 			if c.balance == True and self.subscribeBal == True:
 				retain_reasons.append(6)
 				retain = True
-			
+			"""
 			if c.subscribed == True:#ie manually subscribed, and persistent
 				retain_reasons.append(7)
 				retain = True	
+
+			if c.pid in list(self.ctx.acct.order_keys):
+				print(f"retaining {c.pid} b/c has order")
+				retain = True
 
 			if retain == True:
 				#log('retaining {} {}'.format(c.pid, retain_reasons))
 				collective_block_update[c.pid] = block_update
 
-		log('sendlist {}'.format(self.sendlist))
+		#log('sendlist {}'.format(self.sendlist))
 		log('lookAtMeCountVOL: {} lookAtMeCountPCT: {}'.format(lookAtMeCountVOL,lookAtMeCountPCT))
 		#log(f"CONNECTIONS: {self.ctx.wss.connections}")
+		"""
 		for wskey in list(self.ctx.wss.connections):
-			#log(f"appending block_update to queues: {wskey} {json.dumps(collective_block_update)}")
+			log(f"appending block_update to queues: {wskey} {json.dumps(collective_block_update)}")
 			self.ctx.wss.queues[wskey].append(json.dumps(collective_block_update))
+		"""
 
 	def channel_cycler(self):
 		#log('self.tnext = {:.2f} ({:.2f})'.format(self.tnext,(self.tnext-time.time())))
@@ -558,19 +563,18 @@ class Z25d:
 		#log(f"update_channel {msg['product_id']}")
 		if msg['product_id'] in list(self.channels):
 			#log(f"updating channel {msg['product_id']}")
+			
+			#rvals from candlestick[0](Pct) and channel(Vol) 1=Vol,2=Pct,3=Vol&&Pct
 			rval = self.channels[msg['product_id']].update(msg)#rval=isNewForWatch (either Vol or Pct or Both)
 			sendFlag=False
 			if self.subscribePct == True and (rval == 2 or rval == 3):sendFlag=True
 			elif self.subscribeVol == True and (rval == 1 or rval == 3):sendFlag=True
-			elif msg['product_id']=='BTC-USD' and self.subscribeBTC:sendFlag=True
+			elif msg['product_id'] in self.sendlist:sendFlag=True
+			elif msg['product_id']=='BTC-USD' and self.subscribeBTC:sendFlag=True#throttle btc?
 
 			#log(f"sendFlag = {sendFlag}")
 			if sendFlag == True:#0,1,2,3 no,newvol,newpct,newboth then we bring client up-to-date with this channel immedieately (vs top of minute) 1x
 				#good place to add b/c only called 1x on first NewForWatch
-				if not msg['product_id'] in self.sendlist:
-					log('CULPRIT rval = {} {} {} {}'.format(rval,msg['product_id'],self.subscribePct,self.subscribeVol))
-					self.sendlist.append(msg['product_id'])
-					#self.sendBlockUpdateNow()#  either way its sending block update below, so this appears 2B redundant
 				for wskey in list(self.ctx.wss.connections):
 					#log(f"sending for {msg['product_id']}")
 					self.ctx.wss.queues[wskey].append(json.dumps(self.channels[msg['product_id']].block_update()))
@@ -656,9 +660,12 @@ class Z25d:
 				log(f'not a ticker message {raw_msg}')
 				return
 			
+			self.t_last_ticker=time.time()
+
 			msg=mkOldFmt(msg)
 			#plog(msg)
 			#print(f"{self.ctx.wss.connections}")
+			"""
 			if msg['product_id'] == 'BTC-USD' and self.subscribeBTC:
 				for wskey in self.ctx.wss.connections:
 					self.ctx.wss.queues[wskey].append(json.dumps(msg))
@@ -669,7 +676,7 @@ class Z25d:
 			elif msg['product_id'] in self.sendlist:#msg['product_id'] in self.channels and (self.channels[msg['product_id']].lookAtMePCT == True or self.channels[msg['product_id']].lookAtMeVOL == True):
 				for wskey in self.ctx.wss.connections:#NEED:sendlist is currently default GRT only
 					self.ctx.wss.queues[wskey].append(json.dumps(msg))
-			
+			"""
 			#print(f"{len(self.ctx.wss.queues[wskey])}")
 			self.update_channel(msg)
 
@@ -727,6 +734,13 @@ class Z25d:
 			log('sending json_state to {}'.format(wskey))
 			self.ctx.wss.queues[wskey].append(json_state)
 
+	def getAllChannels(self):
+		collective_block_update = {'type':'collective_block_update',}
+		for c in self.channels.values():
+			collective_block_update[c.pid] = c.block_update()
+		for wskey in list(self.ctx.wss.connections):
+			self.ctx.wss.queues[wskey].append(json.dumps(collective_block_update))
+
 	def sendBlockUpdateNow(self):
 		collective_block_update = {'type':'collective_block_update',}
 		lookAtMeCountVOL=0
@@ -766,7 +780,35 @@ class Z25d:
 
 	def clearLookAtMe(self):
 		print(f"z25.clearLookAtMe")
+		self.sendlist=[]
+		self.subscribed_products_list=[]
+		self.subscribed_products_string=""
+		self.hotlist={}
+		for c in self.channels.values():
+			c.lookAtMePct=False
+			c.lookAtMeVol=False
+			c.subscribed=False
+		for wskey in list(self.ctx.wss.connections):
+			self.ctx.wss.queues[wskey]=[]
+		for c in self.channels.values():
+			if c.lookAtMePct==True:
+				print(f"WHOA! {c.pid} lookAtMePct: {c.lookAtMePct} {self.channels[c.pid].lookAtMePct}")
+			if c.lookAtMeVol==True:
+				print(f"WHOA! {c.pid} lookAtMeVol: {c.lookAtMeVol} {self.channels[c.pid].lookAtMeVol}")
 
+	def take_settings(self,msg):
+		log("take_settings")
+		self.volThresh=msg['volThresh']
+		self.pctThresh=msg['pctThresh']
+		self.subscribeBTC=msg['subscribeBTC']
+		self.subscribeETH=msg['subscribeETH']
+		self.subscribePct=msg['subscribePct']
+		self.subscribeVol=msg['subscribeVol']
+		self.subscribeBal=msg['subscribeBal']
+		#
+		for c in self.channels.values():
+			c.setThresh(self.pctThresh, self.volThresh)
+		
 	def subscribe(self, pid):
 		self.channels[pid].subscribed=True
 
@@ -774,7 +816,23 @@ class Z25d:
 		self.channels[pid].subscribed=False
 
 	def report(self):
-		print(f"z25.report")
+		log(f"z25.report")
+		log(f"pct-thresh: {self.pctThresh} vol-thresh:{self.volThresh}")
+		log(f"t_last_ticker: {self.t_last_ticker}")
+		log(f"tnext: {self.tnext}")
+		log(f"sendlist: {self.sendlist}")
+		log(f"subscribed: {self.subscribed_products_list}")
+		log(f"subscribed: {self.subscribed_products_string}")
+
+		print(f"self.pctThresh: {self.pctThresh}")
+		print(f"self.volThresh: {self.volThresh}")
+		print(f"self.subscribeBTC: {self.subscribeBTC}")
+		print(f"self.subscribeETH: {self.subscribeETH}")
+		print(f"self.subscribePct: {self.subscribePct}")
+		print(f"self.subscribeVol: {self.subscribeVol}")
+		print(f"self.subscribeBal: {self.subscribeBal}")
+
+		#for c in self.channels:c.report()
 
 if __name__=="__main__":
 	z25d=Z25d()
