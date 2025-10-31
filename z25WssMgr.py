@@ -121,6 +121,7 @@ class Z25WSSMgr:
 			self.queues[websocket]=[]
 			self.connections[websocket]={}
 		
+		print(dir(self.ctx.z25))
 		self.ctx.z25.sendZ25D()
 		self.ctx.z25.sendBlockUpdateNow()
 

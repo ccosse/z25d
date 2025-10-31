@@ -23,6 +23,7 @@ it's flickering b/c soo many BTC msgs, and duplicates!
 
 NEED: on connection closed need to delete the queue ... they could be overflowing ... add to report.
 Also, when z25d prints "connection closed" need to cleanup its queues ... should be deleted.
-SOmehow lookAtMePCT/VOL is passing all 
+Somehow lookAtMePCT/VOL is passing all 
 Check for holdings w/o sell order
 restart cbx not working
+just subscribe to one mundane coin + BTC to investigate how it's getting lookAtMePCT/VOL=True

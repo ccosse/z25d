@@ -20,7 +20,7 @@ if True:
 	import z25WssMgr as wssMgr
 	import z25TxAcctMgr as acctMgr
 
-	SUBSCRIBE_ALL = True
+	SUBSCRIBE_ALL = False
 	CURRENCIES_URL = 'https://api.exchange.coinbase.com/currencies'
 	WS_CBX_FEED="wss://ws-feed.exchange.coinbase.com"
 
@@ -333,7 +333,7 @@ class Z25d:
 		self.cbx_thread = None
 		self.close_cycler_thread = False
 		self.close_cbx_thread = False
-		self.subscribed_products_list=[]
+		self.subscribed_products_list=['CLANKER-USD',]
 		self.subscribed_products_string=""
 		#
 		self.subscribeVol = True
@@ -470,7 +470,6 @@ class Z25d:
 				self.currencies.append(response[i]['id'])
 				subscribeCondition=False
 				if response[i]['id']=='BTC' and self.subscribeBTC:subscribeCondition=True
-				if f"{response[i]['id']}-USD" in self.subscribed_products_list:subscribeCondition=True
 				if subscribeCondition or SUBSCRIBE_ALL:
 					self.subscribed_products_list.append(f"{response[i]['id']}-USD")
 					self.subscribed_products_string+=f"{response[i]['id']}-USD"
@@ -479,7 +478,7 @@ class Z25d:
 
 		cycler_thread = threading.Thread(target=self.channel_cycler)
 		cycler_thread.start()
-		log(f"channel_cycler started")
+		log(f"channel_cycler started: {self.subscribed_products_list}")
 		asyncio.run(self.ctx.wss.xmain())
 
 	def cycle_channels(self):
@@ -571,12 +570,13 @@ class Z25d:
 			elif self.subscribeVol == True and (rval == 1 or rval == 3):sendFlag=True
 			elif msg['product_id'] in self.sendlist:sendFlag=True
 			elif msg['product_id']=='BTC-USD' and self.subscribeBTC:sendFlag=True#throttle btc?
+			elif msg['product_id'] in self.ctx.acct.order_keys:sendFlag=True
 
 			#log(f"sendFlag = {sendFlag}")
 			if sendFlag == True:#0,1,2,3 no,newvol,newpct,newboth then we bring client up-to-date with this channel immedieately (vs top of minute) 1x
 				#good place to add b/c only called 1x on first NewForWatch
 				for wskey in list(self.ctx.wss.connections):
-					#log(f"sending for {msg['product_id']}")
+					#log(f"sending for {msg['product_id']}")z25TxAcctMgr.py
 					self.ctx.wss.queues[wskey].append(json.dumps(self.channels[msg['product_id']].block_update()))
 		else:
 			log(f"CREATE {msg['product_id'] in self.channels}\t{msg['product_id']}")
@@ -599,27 +599,33 @@ class Z25d:
 		#log(rval)
 
 	def subscribe_new(self):
+		# --- init liveness controls ---
+		if not hasattr(self, 'cbx_stop') or self.cbx_stop is None:
+			self.cbx_stop = threading.Event()
+		self.cbx_stop.clear()
+
 		channel = 'ticker'
 		timestamp = str(int(time.time()))
 		subscribe_msg = {
 			'type': 'subscribe',
 			"channels": [
-   			 { "name": "ticker", "product_ids": self.subscribed_products_list }
-  			],
+				{"name": "ticker", "product_ids": self.subscribed_products_list}
+			],
 			'api_key': API_KEY,
 			'timestamp': timestamp,
 			'signature': self.sign_message(timestamp + channel + self.subscribed_products_string)
 		}
-		#plog(subscribe_msg)
 		subscribe_msg = json.dumps(subscribe_msg)
 
 		def on_open(ws):
-			self.CBX_FEED.send(subscribe_msg)
-		
-		def mkOldFmt(msg):
-			#log(f"mkOldFmt")
 			try:
-				rval ={
+				self.CBX_FEED.send(subscribe_msg)
+			except Exception as e:
+				log(f"on_open send failed: {e}")
+
+		def mkOldFmt(msg):
+			try:
+				return {
 					"best_ask": "0",
 					"best_ask_size": "0",
 					"best_bid": "0",
@@ -638,71 +644,120 @@ class Z25d:
 					"volume_24h": msg["volume_24h"],
 					"volume_30d": msg["volume_30d"]
 				}
-				return rval
-			except:
+			except Exception:
 				log(f"{sys.exc_info()}")
-			return None
+				return None
 
 		def on_message(ws, raw_msg):
-			msg=json.loads(raw_msg)#ticker update from coinbase
-			#plog(msg)
-			if msg['type']=="error":
-				#log(f"{raw_msg}")
-				product_id=msg['reason'].split(" ")[0]
-				self.subscribed_products_list.remove(product_id)
-				return
-			
-			elif msg['type']=='subscriptions':
-				self.subscribed_products_list=msg['channels']['product_ids']
+			try:
+				msg = json.loads(raw_msg)  # ticker update from coinbase
+			except Exception as e:
+				log(f"json decode error: {e}")
 				return
 
-			elif msg['type']!='ticker':
+			if msg.get('type') == "error":
+				try:
+					product_id = msg.get('reason', '').split(" ")[0]
+					if product_id in self.subscribed_products_list:
+						self.subscribed_products_list.remove(product_id)
+				except Exception:
+					pass
+				return
+
+			elif msg.get('type') == 'subscriptions':
+				# leave as-is per your current logic (structure may differ)
+				try:
+					self.subscribed_products_list = msg['channels']['product_ids']
+				except Exception:
+					pass
+				return
+
+			elif msg.get('type') != 'ticker':
 				log(f'not a ticker message {raw_msg}')
 				return
-			
-			self.t_last_ticker=time.time()
 
-			msg=mkOldFmt(msg)
-			#plog(msg)
-			#print(f"{self.ctx.wss.connections}")
-			"""
-			if msg['product_id'] == 'BTC-USD' and self.subscribeBTC:
-				for wskey in self.ctx.wss.connections:
-					self.ctx.wss.queues[wskey].append(json.dumps(msg))
-					#log(f"self.ctx.wss.queues = {self.ctx.wss.queues}")
-			elif msg['product_id'] == 'ETH-USD' and self.subscribeETH:
-				for wskey in self.ctx.wss.connections:
-					self.ctx.wss.queues[wskey].append(json.dumps(msg))
-			elif msg['product_id'] in self.sendlist:#msg['product_id'] in self.channels and (self.channels[msg['product_id']].lookAtMePCT == True or self.channels[msg['product_id']].lookAtMeVOL == True):
-				for wskey in self.ctx.wss.connections:#NEED:sendlist is currently default GRT only
-					self.ctx.wss.queues[wskey].append(json.dumps(msg))
-			"""
-			#print(f"{len(self.ctx.wss.queues[wskey])}")
-			self.update_channel(msg)
+			self.t_last_ticker = time.time()
+			msg = mkOldFmt(msg)
+			if msg:
+				self.update_channel(msg)
 
-		def on_close(ws):
-			log('Websocket connection closed')
+		def on_close(ws, *a):
+			log('WebSocket connection closed')
 
+		def on_error(ws, err):
+			log(f'WebSocket error: {err}')
+
+		# Create and keep a handle so restart can close it
 		self.CBX_FEED = websocket.WebSocketApp(
 			WS_CBX_FEED,
-			on_message=on_message
+			on_open=on_open,
+			on_message=on_message,
+			on_close=on_close,
+			on_error=on_error
 		)
-		self.CBX_FEED.on_open = on_open
-		self.CBX_FEED.on_close = on_close
-		self.CBX_FEED.run_forever()
+
+		# Run until asked to stop; if run_forever returns unexpectedly, loop unless stopping
+		while not self.cbx_stop.is_set():
+			try:
+				# Disable auto-ping here; we'll add our own later in another stage
+				self.CBX_FEED.run_forever(ping_interval=None, ping_timeout=None)
+			except Exception as e:
+				log(f"run_forever exception: {e}")
+			# If not stopping, brief pause before reconnect attempt
+			if not self.cbx_stop.is_set():
+				time.sleep(1)
+
+		# Graceful shutdown path
+		try:
+			self.CBX_FEED.keep_running = False
+			self.CBX_FEED.close()
+		except Exception:
+			pass
+		finally:
+			self.CBX_FEED = None
 
 	def restartCBX(self):
-		log(f"restartCBX")
-		if self.cbx_thread:
-			#self.cbx_thread.join()
-			#time.sleep(1)
-			self.cbx_thread=None
-			self.CBX_FEED=None
-		
-		self.cbx_thread = threading.Thread(target=self.subscribe_new)
-		#websocket_thread.daemon=True
-		log(f"calling cbx_thread.start()")
+		log("restartCBX")
+
+		# Lazily create stop event
+		if not hasattr(self, 'cbx_stop') or self.cbx_stop is None:
+			self.cbx_stop = threading.Event()
+
+		# If a thread is alive, signal it to stop and close the socket
+		if getattr(self, 'cbx_thread', None) and self.cbx_thread.is_alive():
+			try:
+				self.cbx_stop.set()
+				if getattr(self, 'CBX_FEED', None):
+					try:
+						self.CBX_FEED.keep_running = False
+						self.CBX_FEED.close()
+					except Exception as e:
+						log(f"socket close during restart: {e}")
+				# give it a moment to unwind
+				self.cbx_thread.join(timeout=2.0)
+			except Exception as e:
+				log(f"join error: {e}")
+
+		# Start fresh
+		self.cbx_stop.clear()
+		self.cbx_thread = threading.Thread(target=self.subscribe_new, name="cbx_thread", daemon=True)
+		log("calling cbx_thread.start()")
 		self.cbx_thread.start()
+
+	def stopCBX(self):
+		if not hasattr(self, 'cbx_stop') or self.cbx_stop is None:
+			return
+		self.cbx_stop.set()
+		try:
+			if getattr(self, 'CBX_FEED', None):
+				self.CBX_FEED.keep_running = False
+				self.CBX_FEED.close()
+		except Exception:
+			pass
+		if getattr(self, 'cbx_thread', None):
+			self.cbx_thread.join(timeout=2.0)
+		self.cbx_thread = None
+		self.CBX_FEED = None
 
 	def sign_message(self,message):
 		message = hmac.new(API_SECRET.encode('utf-8'), message.encode('utf-8'), digestmod=hashlib.sha256).hexdigest()
@@ -832,7 +887,8 @@ class Z25d:
 		print(f"self.subscribeVol: {self.subscribeVol}")
 		print(f"self.subscribeBal: {self.subscribeBal}")
 
-		#for c in self.channels:c.report()
+		for c in self.channels.values():
+			log(f"{c.pid}\thas received\t{c.count} messages")
 
 if __name__=="__main__":
 	z25d=Z25d()
