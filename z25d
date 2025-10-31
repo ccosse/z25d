@@ -506,20 +506,20 @@ class Z25d:
 					continue
 				if not entry.get('new'):
 					continue
-				
+
 				try:
 					self.update_channel(self.mkOldFmt(entry['msg']))
 				except Exception as e:
 					log(f"msg_queue_reader process error: {e}")
 					continue
-				
+
 				# If the slot wasn't replaced by writer, mark it consumed
 				cur = self.message_queue.get(pid)
 				if cur is entry:
 					cur['new'] = False
-	
+
 			time.sleep(0.2)
-	
+
 	def start(self):
 		self.load_state()
 		response = requests.get(CURRENCIES_URL).json()
@@ -882,16 +882,16 @@ class Z25d:
 		self.subscribed_products_string=""
 		self.hotlist={}
 		for c in self.channels.values():
-			c.lookAtMePct=False
-			c.lookAtMeVol=False
+			c.lookAtMePCT=False
+			c.lookAtMeVOL=False
 			c.subscribed=False
 		for wskey in list(self.ctx.wss.connections):
 			self.ctx.wss.queues[wskey]=[]
 		for c in self.channels.values():
-			if c.lookAtMePct==True:
-				print(f"WHOA! {c.pid} lookAtMePct: {c.lookAtMePct} {self.channels[c.pid].lookAtMePct}")
-			if c.lookAtMeVol==True:
-				print(f"WHOA! {c.pid} lookAtMeVol: {c.lookAtMeVol} {self.channels[c.pid].lookAtMeVol}")
+			if c.lookAtMePCT==True:
+				print(f"WHOA! {c.pid} lookAtMePCT: {c.lookAtMePCT} {self.channels[c.pid].lookAtMePCT}")
+			if c.lookAtMeVOL==True:
+				print(f"WHOA! {c.pid} lookAtMeVOL: {c.lookAtMeVOL} {self.channels[c.pid].lookAtMeVOL}")
 
 	def take_settings(self,msg):
 		log("take_settings")
