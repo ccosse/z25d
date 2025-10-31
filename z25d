@@ -485,7 +485,7 @@ class Z25d:
 		except Exception:
 			log(f"{sys.exc_info()}")
 			return None
-
+	"""
 	def msg_queue_reader(self):
 		log("msg_queue_reader")
 		while True:
@@ -495,7 +495,31 @@ class Z25d:
 				self.update_channel(self.mkOldFmt(tmp[pid]['msg']))
 				self.message_queue[pid]['new']=False
 			time.sleep(.2)
-
+	"""
+	def msg_queue_reader(self):
+		log("msg_queue_reader")
+		while True:
+			# Snapshot keys so dict mutations during the loop won't matter
+			for pid in list(self.message_queue.keys()):
+				entry = self.message_queue.get(pid)
+				if not entry:
+					continue
+				if not entry.get('new'):
+					continue
+				
+				try:
+					self.update_channel(self.mkOldFmt(entry['msg']))
+				except Exception as e:
+					log(f"msg_queue_reader process error: {e}")
+					continue
+				
+				# If the slot wasn't replaced by writer, mark it consumed
+				cur = self.message_queue.get(pid)
+				if cur is entry:
+					cur['new'] = False
+	
+			time.sleep(0.2)
+	
 	def start(self):
 		self.load_state()
 		response = requests.get(CURRENCIES_URL).json()
