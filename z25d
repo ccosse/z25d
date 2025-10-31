@@ -7,7 +7,7 @@ def plog(_x):#pretty log
 
 if True:
 	import AppContext as appContext
-	import os,sys,time,threading,websocket,hashlib,io,csv,math
+	import os,sys,time,threading,websocket,hashlib,io,csv,math,copy
 	import json, hmac, hashlib, time, base64
 	import requests,datetime
 	import locale,pytz
@@ -20,7 +20,7 @@ if True:
 	import z25WssMgr as wssMgr
 	import z25TxAcctMgr as acctMgr
 
-	SUBSCRIBE_ALL = False
+	SUBSCRIBE_ALL = True
 	CURRENCIES_URL = 'https://api.exchange.coinbase.com/currencies'
 	WS_CBX_FEED="wss://ws-feed.exchange.coinbase.com"
 
@@ -318,6 +318,7 @@ class Z25d:
 		self.sendlist = []
 		self.currencies=[]
 		self.hotlist={}
+		self.message_queue={}
 		#
 		wss = wssMgr.Z25WSSMgr()
 		acct = acctMgr.Z25TxAcctMgr()
@@ -333,7 +334,7 @@ class Z25d:
 		self.cbx_thread = None
 		self.close_cycler_thread = False
 		self.close_cbx_thread = False
-		self.subscribed_products_list=['CLANKER-USD',]
+		self.subscribed_products_list=[]
 		self.subscribed_products_string=""
 		#
 		self.subscribeVol = True
@@ -459,7 +460,42 @@ class Z25d:
 		except:
 			log(sys.exc_info())
 		return {}
-		
+
+	def mkOldFmt(self,msg):
+		try:
+			return {
+				"best_ask": "0",
+				"best_ask_size": "0",
+				"best_bid": "0",
+				"best_bid_size": "0",
+				"high_24h": msg["high_24h"],
+				"last_size": msg["last_size"],
+				"low_24h": msg["low_24h"],
+				"open_24h": str(self.channels[msg["product_id"]].open_24h) if msg.get("product_id") in self.channels else "0",
+				"price": msg["price"],
+				"product_id": msg["product_id"],
+				"sequence": msg["sequence"],
+				"side": msg["side"],
+				"time": msg["time"],
+				"trade_id": 0,
+				"type": "ticker",
+				"volume_24h": msg["volume_24h"],
+				"volume_30d": msg["volume_30d"]
+			}
+		except Exception:
+			log(f"{sys.exc_info()}")
+			return None
+
+	def msg_queue_reader(self):
+		log("msg_queue_reader")
+		while True:
+			tmp=copy.copy(self.message_queue)
+			for pid in tmp:#
+				if not tmp[pid]['new']:continue
+				self.update_channel(self.mkOldFmt(tmp[pid]['msg']))
+				self.message_queue[pid]['new']=False
+			time.sleep(.2)
+
 	def start(self):
 		self.load_state()
 		response = requests.get(CURRENCIES_URL).json()
@@ -470,6 +506,7 @@ class Z25d:
 				self.currencies.append(response[i]['id'])
 				subscribeCondition=False
 				if response[i]['id']=='BTC' and self.subscribeBTC:subscribeCondition=True
+				elif response[i]['id']=='ETH' and self.subscribeETH:subscribeCondition=True
 				if subscribeCondition or SUBSCRIBE_ALL:
 					self.subscribed_products_list.append(f"{response[i]['id']}-USD")
 					self.subscribed_products_string+=f"{response[i]['id']}-USD"
@@ -479,6 +516,11 @@ class Z25d:
 		cycler_thread = threading.Thread(target=self.channel_cycler)
 		cycler_thread.start()
 		log(f"channel_cycler started: {self.subscribed_products_list}")
+
+		msg_queue_reader = threading.Thread(target=self.msg_queue_reader)
+		msg_queue_reader.start()
+		log(f"msg_queue_reader started")
+
 		asyncio.run(self.ctx.wss.xmain())
 
 	def cycle_channels(self):
@@ -523,7 +565,7 @@ class Z25d:
 				retain = True	
 
 			if c.pid in list(self.ctx.acct.order_keys):
-				print(f"retaining {c.pid} b/c has order")
+				#print(f"retaining {c.pid} b/c has order")
 				retain = True
 
 			if retain == True:
@@ -623,31 +665,6 @@ class Z25d:
 			except Exception as e:
 				log(f"on_open send failed: {e}")
 
-		def mkOldFmt(msg):
-			try:
-				return {
-					"best_ask": "0",
-					"best_ask_size": "0",
-					"best_bid": "0",
-					"best_bid_size": "0",
-					"high_24h": msg["high_24h"],
-					"last_size": msg["last_size"],
-					"low_24h": msg["low_24h"],
-					"open_24h": str(self.channels[msg["product_id"]].open_24h) if msg.get("product_id") in self.channels else "0",
-					"price": msg["price"],
-					"product_id": msg["product_id"],
-					"sequence": msg["sequence"],
-					"side": msg["side"],
-					"time": msg["time"],
-					"trade_id": 0,
-					"type": "ticker",
-					"volume_24h": msg["volume_24h"],
-					"volume_30d": msg["volume_30d"]
-				}
-			except Exception:
-				log(f"{sys.exc_info()}")
-				return None
-
 		def on_message(ws, raw_msg):
 			try:
 				msg = json.loads(raw_msg)  # ticker update from coinbase
@@ -676,10 +693,11 @@ class Z25d:
 				log(f'not a ticker message {raw_msg}')
 				return
 
-			self.t_last_ticker = time.time()
-			msg = mkOldFmt(msg)
-			if msg:
-				self.update_channel(msg)
+			#self.t_last_ticker = time.time()
+			if not msg['product_id'] in self.message_queue:
+				self.message_queue[msg['product_id']]={'msg':None,'new':True}
+			self.message_queue[msg['product_id']]['msg']=msg
+			self.message_queue[msg['product_id']]['new']=True
 
 		def on_close(ws, *a):
 			log('WebSocket connection closed')
@@ -889,6 +907,8 @@ class Z25d:
 
 		for c in self.channels.values():
 			log(f"{c.pid}\thas received\t{c.count} messages")
+
+		print(f"message_queue: {self.message_queue}")
 
 if __name__=="__main__":
 	z25d=Z25d()
